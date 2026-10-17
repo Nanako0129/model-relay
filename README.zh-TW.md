@@ -87,6 +87,10 @@ Config OK (~/.claude/model-relay.json)
 
 當 Anthropic 回傳 429 額度上限時，轉發站會當場把請求改送往 `failover.provider` 並將該對話 ID 標記固定 7 天。經過 `cooldownMs`（預設 10 分鐘）後，新對話會重新嘗試使用 Claude，而已經切走的長對話會固定留在備援供應商。
 
+### 供應商透明自動重試
+
+供應商回 429 或 5xx 時，轉發站在**同一個供應商**上以指數退避自動重試（`retry.attempts`/`delayMs`/`backoff`），單次等待受 `retry.maxDelayMs` 上限；更長的 `Retry-After` 以此上限持續輪詢。Claude Code 完全看不到中間的失敗。若希望重試耗盡後直接改送 `failover.provider`，開啟 `retry.failover`。
+
 ### 內建 6 大供應商 Presets 與本地 Gateway 自動拉起
 
 內建 `zai`、`glm`、`deepseek`、`kimi`、`minimax`、`openrouter`、`gemini`、`magpie` 預設集，設定檔只需填寫 `token`（或 `"env:VAR_NAME"`）即可自動帶入網址與相容參數。針對跑在 `127.0.0.1` 的本地 Gateway，可設定 `launch: { command, args }`，在連接埠未開啟時自動由轉發站於背景啟動。
@@ -102,6 +106,11 @@ Config OK (~/.claude/model-relay.json)
 | `failover.enabled` | `true` | 遇到 Claude 429 額度用完時是否自動切換至備援供應商 |
 | `failover.provider` | `"glm"`（或第一個供應商） | 429 自動備援使用的供應商名稱 |
 | `failover.cooldownMs` | `600000` | 幾毫秒後讓新對話重新測試 Claude 是否恢復（預設 10 分鐘） |
+| `retry.attempts` | `3` | 同一個供應商回 429/5xx 時的退避重試次數 |
+| `retry.delayMs` | `2000` | 第一次重試的等待毫秒數，之後每次乘上 `retry.backoff` |
+| `retry.backoff` | `2` | 重試間隔倍數（2s → 4s → …），上限受 `retry.maxDelayMs` 限制 |
+| `retry.maxDelayMs` | `10000` | 單次等待上限；更長的 `Retry-After` 以此間隔持續輪詢 |
+| `retry.failover` | `false` | 選配：重試耗盡後把原始請求改送 `failover.provider`，而不是回傳錯誤 |
 | `providers.<name>.preset` | `<name>` | 可選預設集（`zai`、`glm`、`deepseek`、`kimi`、`minimax`、`openrouter`、`gemini`、`magpie`） |
 | `providers.<name>.baseUrl` | （由 preset 帶入） | 該供應商相容 Anthropic 格式的上游網址 |
 | `providers.<name>.token` | （必填） | API 金鑰字串，或 `"env:ENV_VAR_NAME"` 從環境變數讀取 |

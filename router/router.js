@@ -170,7 +170,7 @@ function pingOne(provider) {
   })
 }
 
-function toProvider(provider, req, res, body, rewrite, sid) {
+function toProvider(provider, req, res, body, rewrite, sid, attempt = 0) {
   const t0 = Date.now()
   let out = body
   if (body.length) {
@@ -185,24 +185,63 @@ function toProvider(provider, req, res, body, rewrite, sid) {
     }
   }
   const headers = buildAuthHeaders(provider, req.headers)
+  const cfgNow = readCfg()
+  const retryCfg = cfgNow ? cfgNow.retry : null
+
+  // Retries exhausted on this provider: hand the ORIGINAL body to the failover provider when one exists
+  const giveUp = (status, text, upstreamHeaders) => {
+    const fo = cfgNow && cfgNow.failoverEnabled !== false ? cfgNow.providers[cfgNow.failoverProvider] : null
+    if (retryCfg && retryCfg.failover && fo && fo.name !== provider.name) {
+      log(`provider "${provider.name}" kept failing (last ${status}); failing over to "${fo.name}" for this request`)
+      return toProvider(fo, req, res, body, true, sid, 0)
+    }
+    if (text !== null) {
+      res.writeHead(status, upstreamHeaders || { 'content-type': 'application/json' })
+      return res.end(text)
+    }
+    return apiError(res, 502, `provider "${provider.name}" unreachable`)
+  }
+
+  const maybeRetry = (status, upstreamHeaders, onErrorText) => {
+    providerStats[provider.name] = { status, ms: Date.now() - t0, at: Date.now() }
+    if (!retryCfg) return false
+    const wait = L.retryWaitMs(status, upstreamHeaders, attempt, retryCfg)
+    if (wait === null) return false
+    log(`provider "${provider.name}" answered ${status}; retry ${attempt + 1}/${retryCfg.attempts} in ${wait}ms`)
+    setTimeout(() => toProvider(provider, req, res, body, rewrite, sid, attempt + 1), wait)
+    return true
+  }
 
   send(provider.url, req, out, headers, (ur) => {
-    res.writeHead(ur.statusCode, ur.headers)
-    let tail = ''
-    ur.on('data', (c) => {
-      tail = (tail + c.toString('utf8')).slice(-4000)
-    })
+    const status = ur.statusCode || 0
+    if (status >= 200 && status < 300) {
+      res.writeHead(ur.statusCode, ur.headers)
+      let tail = ''
+      ur.on('data', (c) => {
+        tail = (tail + c.toString('utf8')).slice(-4000)
+      })
+      ur.on('end', () => {
+        providerStats[provider.name] = { status, ms: Date.now() - t0, at: Date.now() }
+        const all = [...tail.matchAll(/"input_tokens"\s*:\s*(\d+)/g)]
+        const last = all.length ? Number(all[all.length - 1][1]) : null
+        const tag = provider.name === 'glm' ? 'zai' : provider.name
+        logReq({ to: `${tag}-reply`, sid: short(sid), rewrite, status, bytes: out.length, inputTokens: last, attempt })
+      })
+      return ur.pipe(res)
+    }
+    // Failure: buffer the whole answer, then retry, fail over, or pass it through untouched
+    const chunks = []
+    ur.on('data', (c) => chunks.push(c))
     ur.on('end', () => {
-      providerStats[provider.name] = { status: ur.statusCode || 0, ms: Date.now() - t0, at: Date.now() }
-      const all = [...tail.matchAll(/"input_tokens"\s*:\s*(\d+)/g)]
-      const last = all.length ? Number(all[all.length - 1][1]) : null
-      const tag = provider.name === 'glm' ? 'zai' : provider.name
-      logReq({ to: `${tag}-reply`, sid: short(sid), rewrite, status: ur.statusCode, bytes: out.length, inputTokens: last })
+      const text = Buffer.concat(chunks)
+      logReq({ to: `${provider.name}-fail`, sid: short(sid), status, bytes: text.length, attempt })
+      if (maybeRetry(status, ur.headers, null)) return
+      giveUp(status, text, ur.headers)
     })
-    ur.pipe(res)
   }, (e) => {
-    providerStats[provider.name] = { status: 502, ms: Date.now() - t0, at: Date.now() }
-    apiError(res, 502, `provider "${provider.name}" unreachable: ${e.message}`)
+    logReq({ to: `${provider.name}-fail`, sid: short(sid), status: 0, attempt, error: e.message })
+    if (maybeRetry(502, null, e.message)) return
+    giveUp(502, null, null)
   })
 }
 

@@ -6,6 +6,18 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-18
+
+A provider that answers 429 or 5xx no longer kills your turn: the relay retries the SAME provider with exponential backoff, polling at `retry.maxDelayMs` when `Retry-After` asks for longer, so Claude Code never sees the intermediate failures. Cross-provider failover after exhausted retries is available as an opt-in.
+
+**Upgrading:** Pull the latest version; same-provider retrying is on by default and needs no configuration. Tune it with the new `retry` settings.
+
+### Added
+
+- **Transparent same-provider retries with backoff:** Failing provider answers (429, 500, 502, 503, 504, 529) are retried on the same provider up to `retry.attempts` times with `retry.delayMs` × `retry.backoff` waits, capped by `retry.maxDelayMs`. Settings: `retry`.
+- **`Retry-After` awareness:** A provider asking to wait longer than `retry.maxDelayMs` keeps being polled at that cap instead of giving up early. Setting: `retry.maxDelayMs`.
+- **Opt-in cross-provider failover:** With `retry.failover: true`, the original (un-rewritten) request is forwarded to `failover.provider` once retries run out, so the turn completes on the backup model rather than returning the error. Setting: `retry.failover`.
+
 ## [0.4.0] - 2026-10-17
 
 Type `/provider` to open an interactive `AbovePrompt` control panel right above your prompt input box: switch the current window's model with one click (or hotkeys `1`–`9`), test live latency across every provider (`[Ping]`), and protect long prompt caches with a two-click confirmation before switching back to Claude. Both English and Traditional Chinese READMEs now have their own animated banners and story diagrams.
@@ -37,6 +49,7 @@ Type `/provider` to open an interactive `AbovePrompt` control panel right above 
 
 - **Legacy child-process `custom_agent` tool:** Removed the deprecated `claude.exe -p` child-process wrapper so the plugin focuses purely on fast, zero-overhead HTTP relay and session routing.
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.4.0...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/cablate/model-relay/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cablate/model-relay/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cablate/model-relay/releases/tag/v0.3.0

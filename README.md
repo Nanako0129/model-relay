@@ -87,6 +87,10 @@ Type `/provider` (or `/provider panel`) to open an interactive control panel rig
 
 When Anthropic returns a 429 usage-limit response, the router immediately forwards the request to your configured `failover.provider` and pins that session ID for 7 days. After `cooldownMs` (default 10 minutes), new sessions probe Claude again while existing sticky sessions stay on their backup provider.
 
+### Transparent provider retries
+
+A provider answering 429 or 5xx is retried on the SAME provider with exponential backoff (`retry.attempts`/`delayMs`/`backoff`), capped by `retry.maxDelayMs`; a longer `Retry-After` keeps polling at that cap. Claude Code never sees the intermediate failures. Turn on `retry.failover` if you would rather have the request handed to `failover.provider` once retries run out.
+
 ### Built-in provider presets and local gateway auto-launch
 
 Use built-in presets (`zai`, `glm`, `deepseek`, `kimi`, `minimax`, `openrouter`, `gemini`, `magpie`) so you only need to supply `token` (or `"env:VAR_NAME"`). For local gateways on `127.0.0.1`, set `launch: { command, args }` and the router will automatically spawn the gateway process whenever its port is closed.
@@ -102,6 +106,11 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 | `failover.enabled` | `true` | Automatically switch to `failover.provider` on Claude 429 usage limits |
 | `failover.provider` | `"glm"` (or first provider) | Provider key used for 429 failover |
 | `failover.cooldownMs` | `600000` | Milliseconds before probing Claude again for new sessions (10 minutes) |
+| `retry.attempts` | `3` | Times the SAME provider is retried with backoff when it answers 429/5xx |
+| `retry.delayMs` | `2000` | First retry delay; multiplied by `retry.backoff` each attempt |
+| `retry.backoff` | `2` | Multiplier between retries (2s → 4s → …), capped by `retry.maxDelayMs` |
+| `retry.maxDelayMs` | `10000` | Longest single wait; a longer `Retry-After` keeps polling at this interval |
+| `retry.failover` | `false` | Opt-in: after retries are exhausted, forward the original request to `failover.provider` instead of returning the error |
 | `providers.<name>.preset` | `<name>` | Optional preset (`zai`, `glm`, `deepseek`, `kimi`, `minimax`, `openrouter`, `gemini`, `magpie`) |
 | `providers.<name>.baseUrl` | (from preset) | Anthropic-compatible upstream URL for this provider |
 | `providers.<name>.token` | (required) | Literal token or `"env:ENV_VAR_NAME"` |

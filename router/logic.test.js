@@ -102,6 +102,27 @@ test('z.ai requests lose ToolSearch and deferred placeholders', () => {
   assert.deepStrictEqual(rw.tools.map((t) => t.name), ['Read', 'Bash'])
 })
 
+test('provider retry waits: statuses, backoff, Retry-After, exhaustion', () => {
+  const cfg = L.parseCfg({ providers: { glm: { token: 't' } } })
+  assert.strictEqual(cfg.retry.attempts, 3, 'retry defaults: 3 attempts')
+  assert.strictEqual(cfg.retry.delayMs, 2000, 'retry defaults: 2s base delay')
+  assert.strictEqual(cfg.retry.failover, false, 'retry defaults: same-provider only, failover opt-in')
+
+  assert.strictEqual(L.retryWaitMs(404, {}, 0, cfg.retry), null, 'client errors are not retried')
+  assert.strictEqual(L.retryWaitMs(200, {}, 0, cfg.retry), null, 'success is not retried')
+  assert.strictEqual(L.retryWaitMs(429, {}, 0, cfg.retry), 2000, 'first 429 waits the base delay')
+  assert.strictEqual(L.retryWaitMs(429, {}, 1, cfg.retry), 4000, 'second 429 waits base * backoff')
+  assert.strictEqual(L.retryWaitMs(429, {}, 3, cfg.retry), null, 'attempts exhausted')
+  assert.strictEqual(L.retryWaitMs(503, {}, 0, cfg.retry), 2000, '5xx retried like 429')
+  assert.strictEqual(L.retryWaitMs(429, { 'retry-after': '1' }, 0, cfg.retry), 2000, 'Retry-After below base uses the base delay')
+  assert.strictEqual(L.retryWaitMs(429, { 'retry-after': ['3600'] }, 0, cfg.retry), 10000, 'Retry-After beyond budget keeps polling at maxDelayMs')
+  const fast = L.parseCfg({ providers: { glm: { token: 't' } }, retry: { attempts: 1, delayMs: 500, backoff: 3, maxDelayMs: 700, failover: true } })
+  assert.strictEqual(fast.retry.attempts, 1, 'attempts configurable')
+  assert.strictEqual(L.retryWaitMs(429, {}, 0, fast.retry), 500, 'custom base delay')
+  assert.strictEqual(L.retryWaitMs(429, {}, 1, fast.retry), null, 'single attempt then stop')
+  assert.strictEqual(fast.retry.failover, true, 'failover can be turned on')
+})
+
 test('state parsing tolerates junk and old files', () => {
   assert.deepStrictEqual(L.parseState(null), L.emptyState())
   const old = L.parseState({ mode: 'glm', failoverSince: 5, onGlm: { a: 1, b: 'x' } })

@@ -203,7 +203,37 @@ function parseCfg(raw, env = process.env) {
     claudeUrl: str(raw.claudeUrl) || 'https://api.anthropic.com',
     failoverEnabled,
     probeEveryMs: Math.min(120, Math.max(1, min)) * 60000,
+    retry: parseRetryCfg(raw.retry),
   }
+}
+
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529])
+
+function parseRetryCfg(raw) {
+  const r = typeof raw === 'object' && raw !== null ? raw : {}
+  const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d)
+  return {
+    attempts: Math.min(30, Math.floor(num(r.attempts, 3))),
+    delayMs: Math.min(60000, num(r.delayMs, 2000)),
+    backoff: Math.min(4, Math.max(1, num(r.backoff, 2))),
+    maxDelayMs: Math.min(300000, num(r.maxDelayMs, 10000)),
+    failover: r.failover === true,
+  }
+}
+
+// How long to wait before retrying the SAME provider, or null when retrying cannot help
+// (status not retryable, or attempts exhausted). Retry-After within budget is honoured;
+// a longer one keeps polling at maxDelayMs instead of giving up.
+function retryWaitMs(status, headers, attempt, cfg) {
+  if (!RETRYABLE_STATUSES.has(status)) return null
+  if (attempt >= cfg.attempts) return null
+  const ra = headers && headers['retry-after']
+  const raText = Array.isArray(ra) ? ra[0] : ra
+  const raSec = Number(raText)
+  if (Number.isFinite(raSec) && raSec > 0) {
+    return Math.min(Math.max(raSec * 1000, cfg.delayMs), cfg.maxDelayMs)
+  }
+  return Math.min(cfg.maxDelayMs, cfg.delayMs * Math.pow(cfg.backoff, attempt))
 }
 
 const isGeminiModel = (model) => typeof model === 'string' && /^gemini/i.test(model)
@@ -396,6 +426,7 @@ module.exports = {
   PRESETS,
   wireModel,
   resolveToken,
+  retryWaitMs,
   parseProvider,
   parseCfg,
   isGlmModel,
