@@ -1,0 +1,6 @@
+{
+  "name": "model-relay",
+  "version": "0.3.0",
+  "description": "Local model relay & failover router — switch conversations across Claude, GLM, Gemini, or any Anthropic-compatible provider with cache-safe sticky sessions.",
+  "author": { "name": "CabLate" }
+}

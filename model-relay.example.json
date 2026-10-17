@@ -1,0 +1,37 @@
+{
+  "port": 8950,
+  "failover": {
+    "enabled": true,
+    "provider": "glm",
+    "cooldownMs": 600000
+  },
+  "providers": {
+    "glm": {
+      "baseUrl": "https://api.z.ai/api/anthropic",
+      "token": "env:ZAI_API_KEY",
+      "model": "glm-5.3[1m]",
+      "matchModels": ["^glm", "haiku"],
+      "stripToolSearch": true,
+      "stripCacheControl": false,
+      "authHeader": "both"
+    },
+    "deepseek": {
+      "baseUrl": "https://api.deepseek.com/anthropic",
+      "token": "env:DEEPSEEK_API_KEY",
+      "model": "deepseek-chat",
+      "matchModels": ["^deepseek"],
+      "stripToolSearch": true,
+      "stripCacheControl": false,
+      "authHeader": "bearer"
+    },
+    "gemini": {
+      "baseUrl": "http://127.0.0.1:3425",
+      "token": "env:GEMINI_GATEWAY_TOKEN",
+      "model": "gemini-4-argon",
+      "matchModels": ["^gemini"],
+      "stripToolSearch": true,
+      "stripCacheControl": true,
+      "authHeader": "bearer"
+    }
+  }
+}

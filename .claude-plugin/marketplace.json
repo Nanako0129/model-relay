@@ -1,0 +1,15 @@
+{
+  "name": "model-relay",
+  "description": "Multi-provider router and cache-safe 429 failover for Claude Code",
+  "owner": {
+    "name": "CabLate",
+    "url": "https://github.com/cablate"
+  },
+  "plugins": [
+    {
+      "name": "model-relay",
+      "source": "./",
+      "description": "Route Claude Code conversations and subagents across Claude, GLM, Gemini, DeepSeek, or any Anthropic-compatible provider with cache-safe sticky sessions."
+    }
+  ]
+}
