@@ -6,6 +6,18 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-17
+
+Type `/provider` to open an interactive `AbovePrompt` control panel right above your prompt input box: switch the current window's model with one click (or hotkeys `1`–`9`), test live latency across every provider (`[Ping]`), and protect long prompt caches with a two-click confirmation before switching back to Claude. Both English and Traditional Chinese READMEs now have their own animated banners and story diagrams.
+
+**Upgrading:** Pull the latest version or run `claude plugin update model-relay@model-relay`. No configuration changes are required.
+
+### Added
+
+- **Interactive `AbovePrompt` control panel:** Running `/provider` or `/provider panel` opens an interactive panel above the prompt where you can switch providers by clicking buttons or pressing `ctrl+x tab` + `1`–`9`, with a two-step confirmation before switching a pinned session back to Claude.
+- **Live upstream latency ping (`/__ping` and `/provider ping`):** Test live HTTP status and response time for all configured providers directly from the panel (`[Ping]`) or via `/provider ping`, and reset 429 cooldown timers via `[Retry Claude]` or `/provider probe`.
+- **Separate English and Traditional Chinese animated SVGs:** Added dedicated English and Traditional Chinese dark/light banners (`banner-dark.svg`, `banner-light.svg`, `banner-dark.zh-TW.svg`, `banner-light.zh-TW.svg`) and story animations (`relay-flow.svg` / `.zh-TW.svg`, `panel.svg` / `.zh-TW.svg`).
+
 ## [0.3.0] - 2026-10-17
 
 `model-relay` is now open-source as a flexible, multi-provider localhost router and failover toolkit for Claude Code. You can route individual conversations or `haiku` subagents across Claude, GLM (`z.ai`), Gemini (via local gateway), DeepSeek, Kimi, MiniMax, or OpenRouter without losing prompt cache efficiency when Claude hits a 429 usage limit.
@@ -25,5 +37,6 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 - **Legacy child-process `custom_agent` tool:** Removed the deprecated `claude.exe -p` child-process wrapper so the plugin focuses purely on fast, zero-overhead HTTP relay and session routing.
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cablate/model-relay/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cablate/model-relay/releases/tag/v0.3.0

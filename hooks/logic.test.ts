@@ -1,6 +1,9 @@
 import { test } from 'claude-code/testing'
 import {
+  buildPanelData,
   healthArgv,
+  pingArgv,
+  probeArgv,
   sessionArgv,
   parseCfg,
   parseHealth,
@@ -10,6 +13,7 @@ import {
   startArgv,
   statusText,
 } from './logic'
+import { fit } from './panel'
 
 function assert(cond: boolean, msg: string): void {
   if (!cond) throw new Error('assert failed: ' + msg)
@@ -29,8 +33,8 @@ test('parseCfg validates both legacy and multi-provider formats', () => {
     port: 8960,
     failover: { provider: 'deepseek' },
     providers: {
-      glm: { token: 't' }, // uses built-in glm preset!
-      deepseek: { token: 'env:DS_KEY' }, // uses built-in deepseek preset!
+      glm: { token: 't' },
+      deepseek: { token: 'env:DS_KEY' },
     },
   })!
   assert(multi.failoverProvider === 'deepseek' && multi.providers.deepseek === 'deepseek-chat' && multi.providers.glm === 'glm-5.3[1m]', 'multi-provider with built-in presets parsed')
@@ -42,6 +46,8 @@ test('router control commands on Windows and POSIX', () => {
   assert(healthArgv(cfg, 'a b').at(-1) === 'http://127.0.0.1:9001/__health?sid=a%20b', 'health carries the session')
   const m = sessionArgv(cfg, 's1', 'glm')
   assert(m.includes('{"sid":"s1","on":"glm"}') && m.at(-1) === 'http://127.0.0.1:9001/__session', 'per-session switch')
+  assert(pingArgv(cfg, 'glm').at(-1) === 'http://127.0.0.1:9001/__ping', 'ping endpoint')
+  assert(probeArgv(cfg).at(-1) === 'http://127.0.0.1:9001/__probe', 'probe endpoint')
   assert(routerScript('C:\\x\\claude-relay') === 'C:/x/claude-relay/router/router.js', 'script from root')
   assert(routerScript('C:/x/claude-relay/.claude-plugin') === 'C:/x/claude-relay/router/router.js', 'script from manifest dir')
   const sWin = startArgv({ ...cfg, nodePath: 'C:/n o/node.exe' }, 'C:/r.js', "C:/it's", true)
@@ -50,10 +56,10 @@ test('router control commands on Windows and POSIX', () => {
   assert(sPosix[0] === 'sh' && (sPosix[2] ?? '').includes('nohup'), 'posix nohup start')
 })
 
-test('health and status texts (zh and en)', () => {
+test('health, panel data, and status texts (zh and en)', () => {
   assert(parseHealth('nope') === null && parseHealth('{"ok":false}') === null, 'bad health')
-  const h = parseHealth('{"ok":true,"session":"claude","failoverSince":5,"nextClaudeTry":600005}')!
-  assert(h.session === 'claude' && h.failoverSince === 5, 'parsed')
+  const h = parseHealth('{"ok":true,"session":"claude","failoverSince":5,"nextClaudeTry":600005,"sessionsOnCustom":3,"stats":{"glm":{"status":200,"ms":1200,"at":10}}}')!
+  assert(h.session === 'claude' && h.failoverSince === 5 && h.sessionsOnCustom === 3 && h.stats?.glm?.ms === 1200, 'parsed with stats')
   assert(statusText(h, 'glm', false).includes('額度用完'), 'failover status')
   assert(statusText({ ...h, failoverSince: 0 }, 'glm', false) === '主線：Claude', 'normal')
   assert(statusText({ ...h, session: 'glm', failoverSince: 0 }, 'glm', false).includes('固定'), 'sticky session')
@@ -61,5 +67,9 @@ test('health and status texts (zh and en)', () => {
   assert(parseHealth('{"ok":true,"mode":"glm"}')!.session === 'claude', 'old router answer reads as claude')
   assert(statusText(null, 'glm', true).includes('直連'), 'router down, direct')
   const rep = providerReport(h, 'glm', 5)
-  assert(rep.includes('10 分鐘後') && rep.includes('● /provider claude') && rep.includes('○ /provider glm'), 'structured provider report')
+  assert(rep.includes('10 分鐘後') && rep.includes('● /provider claude') && rep.includes('○ /provider glm') && rep.includes('200 · 1200ms'), 'structured provider report with latency')
+  const cfg = parseCfg(base)!
+  const pd = buildPanelData(h, cfg, false, 'zh', 5)
+  assert(pd.online && pd.sessionsOnCustom === 3 && pd.stats.glm?.status === 200, 'panel snapshot built')
+  assert(fit('1234567890', 6) === '12345…', 'fit truncates long text')
 })

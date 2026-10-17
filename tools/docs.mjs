@@ -60,9 +60,9 @@ function changelogKey(title) {
   return title
 }
 
-// 互相連到對方語言的檔案不算差異：X.zh-TW.md 與 X.md 視為同一個目標
+// 互相連到對方語言的檔案不算差異：X.zh-TW.md 與 X.md、X.zh-TW.svg 與 X.svg（各語言自己的圖）視為同一個目標
 // 錨點（#settings／#設定）跟著標題翻譯，只比到檔案為止
-const sameTarget = t => t.replace(/#.*$/, '').replace(/\.zh-TW\.md$/, '.md')
+const sameTarget = t => t.replace(/#.*$/, '').replace(/\.zh-TW(\.\w+)$/, '$1')
 
 // ---------- 比對 ----------
 

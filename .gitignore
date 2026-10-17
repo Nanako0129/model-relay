@@ -1,3 +1,4 @@
+.claude-plugin/types/
 node_modules/
 *.log
 model-relay.json
@@ -5,3 +6,4 @@ custom-agent.json
 model-relay-state.json
 custom-agent-state.json
 .DS_Store
+

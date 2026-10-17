@@ -1,6 +1,6 @@
 'use strict'
 // Local relay router for Claude Code: routes requests across Claude and custom providers
-// (GLM, Gemini, DeepSeek, OpenRouter, etc.), with sticky session cache protection and 429 failover.
+// (GLM, Gemini, DeepSeek, Kimi, MiniMax, OpenRouter, etc.), with sticky session cache protection and 429 failover.
 // Usage: node router.js <config-dir>
 const http = require('http')
 const https = require('https')
@@ -43,6 +43,9 @@ let state = (() => {
   }
 })()
 
+// In-memory runtime latency/status per provider
+const providerStats = {}
+
 const log = (line) => {
   try {
     fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}\n`)
@@ -83,7 +86,7 @@ const logReq = (entry) => {
 const apiError = (res, status, message) => {
   if (res.headersSent) return res.end()
   res.writeHead(status, { 'content-type': 'application/json' })
-  res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: `claude-relay router: ${message}` } }))
+  res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: `model-relay router: ${message}` } }))
 }
 
 const json = (res, obj) => {
@@ -108,7 +111,67 @@ function send(base, req, body, headers, onResponse, onError) {
   up.end(body)
 }
 
+function buildAuthHeaders(provider, baseHeaders = {}) {
+  const headers = { ...baseHeaders }
+  delete headers['x-api-key']
+  delete headers['authorization']
+  if (provider.authHeader === 'bearer' || provider.authHeader === 'both') {
+    headers['authorization'] = `Bearer ${provider.token}`
+  }
+  if (provider.authHeader === 'x-api-key' || provider.authHeader === 'both') {
+    headers['x-api-key'] = provider.token
+  }
+  return headers
+}
+
+function pingOne(provider) {
+  return new Promise((resolve) => {
+    const t0 = Date.now()
+    const u = new URL(provider.url)
+    const lib = u.protocol === 'http:' ? http : https
+    const payload = Buffer.from(JSON.stringify({
+      model: L.wireModel(provider.model),
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'hi' }],
+    }))
+    const headers = buildAuthHeaders(provider, {
+      'content-type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'content-length': payload.length,
+      host: u.host,
+    })
+    const up = lib.request({
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'http:' ? 80 : 443),
+      path: L.upstreamPath(provider.url, '/v1/messages'),
+      method: 'POST',
+      headers,
+      timeout: 8000,
+    }, (ur) => {
+      ur.resume()
+      ur.on('end', () => {
+        const entry = { status: ur.statusCode || 0, ms: Date.now() - t0, at: Date.now() }
+        providerStats[provider.name] = entry
+        resolve(entry)
+      })
+    })
+    up.on('timeout', () => {
+      up.destroy()
+      const entry = { status: 0, ms: Date.now() - t0, at: Date.now() }
+      providerStats[provider.name] = entry
+      resolve(entry)
+    })
+    up.on('error', () => {
+      const entry = { status: 0, ms: Date.now() - t0, at: Date.now() }
+      providerStats[provider.name] = entry
+      resolve(entry)
+    })
+    up.end(payload)
+  })
+}
+
 function toProvider(provider, req, res, body, rewrite, sid) {
+  const t0 = Date.now()
   let out = body
   if (body.length) {
     try {
@@ -121,15 +184,7 @@ function toProvider(provider, req, res, body, rewrite, sid) {
       if (rewrite) return apiError(res, 400, `could not rewrite request for provider "${provider.name}"`)
     }
   }
-  const headers = { ...req.headers }
-  delete headers['x-api-key']
-  delete headers['authorization']
-  if (provider.authHeader === 'bearer' || provider.authHeader === 'both') {
-    headers['authorization'] = `Bearer ${provider.token}`
-  }
-  if (provider.authHeader === 'x-api-key' || provider.authHeader === 'both') {
-    headers['x-api-key'] = provider.token
-  }
+  const headers = buildAuthHeaders(provider, req.headers)
 
   send(provider.url, req, out, headers, (ur) => {
     res.writeHead(ur.statusCode, ur.headers)
@@ -138,13 +193,17 @@ function toProvider(provider, req, res, body, rewrite, sid) {
       tail = (tail + c.toString('utf8')).slice(-4000)
     })
     ur.on('end', () => {
+      providerStats[provider.name] = { status: ur.statusCode || 0, ms: Date.now() - t0, at: Date.now() }
       const all = [...tail.matchAll(/"input_tokens"\s*:\s*(\d+)/g)]
       const last = all.length ? Number(all[all.length - 1][1]) : null
       const tag = provider.name === 'glm' ? 'zai' : provider.name
       logReq({ to: `${tag}-reply`, sid: short(sid), rewrite, status: ur.statusCode, bytes: out.length, inputTokens: last })
     })
     ur.pipe(res)
-  }, (e) => apiError(res, 502, `provider "${provider.name}" unreachable: ${e.message}`))
+  }, (e) => {
+    providerStats[provider.name] = { status: 502, ms: Date.now() - t0, at: Date.now() }
+    apiError(res, 502, `provider "${provider.name}" unreachable: ${e.message}`)
+  })
 }
 
 function toClaude(cfg, req, res, body, trial, sid) {
@@ -186,6 +245,7 @@ function control(req, res, body) {
       nextClaudeTry: state.nextClaudeTry,
       failoverProvider: cfg ? cfg.failoverProvider : 'glm',
       providers,
+      stats: providerStats,
       sessionsOnCustom: Object.keys(state.sticky || {}).length,
       sessionsOnGlm: Object.keys(state.onGlm || {}).length,
       session: L.getSessionProvider(state, cfg, sid),
@@ -206,6 +266,22 @@ function control(req, res, body) {
     setState(L.setSticky(state, sid, on, Date.now()), `session ${short(sid)} set to ${on} by hand`)
     return json(res, { ok: true, session: on })
   }
+  if (u.pathname === '/__probe' && req.method === 'POST') {
+    setState({ ...state, nextClaudeTry: 0 }, 'manual probe requested: next new session will try Claude')
+    return json(res, { ok: true, failoverSince: state.failoverSince, nextClaudeTry: 0 })
+  }
+  if (u.pathname === '/__ping' && req.method === 'POST') {
+    if (!cfg) return apiError(res, 500, 'config missing')
+    let target = ''
+    try {
+      target = String(JSON.parse(body.toString('utf8')).provider || '').trim().toLowerCase()
+    } catch {}
+    const list = target && cfg.providers[target] ? [cfg.providers[target]] : Object.values(cfg.providers)
+    Promise.all(list.map(pingOne)).then(() => {
+      json(res, { ok: true, stats: providerStats })
+    })
+    return
+  }
   return apiError(res, 404, 'unknown control path')
 }
 
@@ -216,7 +292,7 @@ const server = http.createServer((req, res) => {
     const body = Buffer.concat(chunks)
     if (req.url.startsWith('/__')) return control(req, res, body)
     const cfg = readCfg()
-    if (!cfg) return apiError(res, 500, 'claude-relay.json / custom-agent.json is missing or invalid')
+    if (!cfg) return apiError(res, 500, 'model-relay.json / custom-agent.json is missing or invalid')
     const sid = String(req.headers['x-claude-code-session-id'] || '')
     let model = null
     let nMsgs = 0

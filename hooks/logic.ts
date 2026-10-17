@@ -1,3 +1,5 @@
+import type { PanelData, ProviderStat } from '../types'
+
 export interface RelayCfg {
   providers: Record<string, string> // provider name -> model id
   failoverProvider: string
@@ -99,6 +101,14 @@ export function sessionArgv(cfg: RelayCfg, sid: string, on: string, isWin = true
   return [curlBin(isWin), '-s', '-m', '3', '-X', 'POST', '-H', 'content-type: application/json', '-d', JSON.stringify({ sid, on }), `${routerUrl(cfg)}/__session`]
 }
 
+export function pingArgv(cfg: RelayCfg, provider = '', isWin = true): string[] {
+  return [curlBin(isWin), '-s', '-m', '10', '-X', 'POST', '-H', 'content-type: application/json', '-d', JSON.stringify({ provider }), `${routerUrl(cfg)}/__ping`]
+}
+
+export function probeArgv(cfg: RelayCfg, isWin = true): string[] {
+  return [curlBin(isWin), '-s', '-m', '3', '-X', 'POST', `${routerUrl(cfg)}/__probe`]
+}
+
 export function routerScript(pluginRoot: string): string {
   return pluginRoot.replace(/[\\/]\.claude-plugin[\\/]?$/, '').replace(/\\/g, '/') + '/router/router.js'
 }
@@ -122,8 +132,10 @@ export interface Health {
   session: string // 'claude' or a configured provider key
   failoverSince: number
   nextClaudeTry: number
+  sessionsOnCustom?: number
   providers?: Record<string, string>
   failoverProvider?: string
+  stats?: Record<string, ProviderStat>
 }
 
 export function parseHealth(stdout: string): Health | null {
@@ -140,6 +152,17 @@ export function parseHealth(stdout: string): Health | null {
       }
       if (Object.keys(pMap).length > 0) providers = pMap
     }
+    let stats: Record<string, ProviderStat> | undefined
+    if (typeof j.stats === 'object' && j.stats !== null) {
+      const sMap: Record<string, ProviderStat> = {}
+      for (const [k, v] of Object.entries(j.stats as Record<string, unknown>)) {
+        if (typeof v === 'object' && v !== null) {
+          const sv = v as Record<string, unknown>
+          sMap[k.toLowerCase()] = { status: num(sv.status), ms: num(sv.ms), at: num(sv.at) }
+        }
+      }
+      stats = sMap
+    }
     const failoverProvider = typeof j.failoverProvider === 'string' && j.failoverProvider.length > 0
       ? j.failoverProvider.toLowerCase()
       : undefined
@@ -147,8 +170,10 @@ export function parseHealth(stdout: string): Health | null {
       session,
       failoverSince: num(j.failoverSince),
       nextClaudeTry: num(j.nextClaudeTry),
+      sessionsOnCustom: num(j.sessionsOnCustom ?? j.sessionsOnGlm),
       ...(providers ? { providers } : {}),
       ...(failoverProvider ? { failoverProvider } : {}),
+      ...(stats ? { stats } : {}),
     }
   } catch {
     return null
@@ -171,6 +196,24 @@ export function resolveModelsMap(
     : modelOrCfg.failoverProvider
   const failoverModel = activeProviders[foKey] ?? modelOrCfg.model
   return { providers: activeProviders, failoverProvider: foKey, failoverModel }
+}
+
+export function buildPanelData(h: Health | null, cfg: RelayCfg, direct: boolean, lang: 'zh' | 'en', now: number): PanelData {
+  const { providers, failoverProvider } = resolveModelsMap(cfg, null, h)
+  return {
+    online: Boolean(h),
+    direct,
+    port: cfg.port,
+    session: h?.session ?? 'claude',
+    failoverProvider,
+    failoverSince: h?.failoverSince ?? 0,
+    nextClaudeTry: h?.nextClaudeTry ?? 0,
+    sessionsOnCustom: h?.sessionsOnCustom ?? 0,
+    providers,
+    stats: h?.stats ?? {},
+    lang,
+    now,
+  }
 }
 
 export function statusText(h: Health | null, modelOrCfg: string | RelayCfg, direct: boolean, gemini: string | null = null, lang: 'zh' | 'en' = 'zh'): string {
@@ -219,11 +262,18 @@ export function providerReport(h: Health | null, modelOrCfg: string | RelayCfg, 
   for (const [k, m] of Object.entries(providers)) {
     const mark = activeSession === k ? '●' : '○'
     const tag = k === failoverProvider ? (lang === 'en' ? ' [failover]' : ' [預設 429 備援]') : ''
+    const st = h.stats?.[k]
+    const stText = st && st.status > 0 ? ` (${st.status} · ${st.ms}ms)` : ''
     lines.push(
       lang === 'en'
-        ? `  ${mark} /provider ${k.padEnd(8)} Pin this session to ${m}${tag}`
-        : `  ${mark} /provider ${k.padEnd(8)} 這個對話固定改用 ${m}${tag}`,
+        ? `  ${mark} /provider ${k.padEnd(8)} Pin this session to ${m}${tag}${stText}`
+        : `  ${mark} /provider ${k.padEnd(8)} 這個對話固定改用 ${m}${tag}${stText}`,
     )
   }
+  lines.push(
+    lang === 'en'
+      ? '  · /provider panel    Toggle interactive control panel above prompt'
+      : '  · /provider panel    開關輸入框上方的互動控制面板（亦支援 /provider ping 測速）',
+  )
   return lines.join('\n')
 }

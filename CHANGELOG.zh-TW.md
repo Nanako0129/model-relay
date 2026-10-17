@@ -6,6 +6,18 @@
 
 ## [未發布]
 
+## [0.4.0] - 2026-10-17
+
+輸入 `/provider` 即可在輸入框上方開啟 `AbovePrompt` 互動控制面板：一鍵（或按熱鍵 `1`–`9`）切換單一視窗的模型、即時測試各供應商的回應延遲（`[Ping]`），並在切回 Claude 前提供二次確認以保護長對話快取。英文與繁體中文 README 現在各自擁有獨立的深淺色動態 Banner 與情境動畫圖。
+
+**升級：** 拉取最新版本或執行 `claude plugin update model-relay@model-relay` 即可，無須修改現有設定檔。
+
+### 新增
+
+- **輸入框上方的 `AbovePrompt` 互動控制面板：** 執行 `/provider` 或 `/provider panel` 會在輸入框上方打開互動面板，可直接點選按鈕或按 `ctrl+x tab` 加數字鍵 `1`–`9` 切換模型，並在將已固定的長對話切回 Claude 前提供二次確認防呆。
+- **上游供應商即時連線測速（`/__ping` 與 `/provider ping`）：** 可直接從面板點選 `[Ping]` 或輸入 `/provider ping` 即時測試所有供應商的 HTTP 狀態碼與回應時間，並支援透過 `[Retry Claude]` 或 `/provider probe` 重置 429 冷卻計時。
+- **中英雙語獨立動態 SVG：** 為英文與繁體中文分別設計專屬的深淺色動態 Banner（`banner-dark.svg`、`banner-light.svg`、`banner-dark.zh-TW.svg`、`banner-light.zh-TW.svg`）以及兩組情境動畫（`relay-flow.svg` / `.zh-TW.svg`、`panel.svg` / `.zh-TW.svg`）。
+
 ## [0.3.0] - 2026-10-17
 
 `model-relay` 正式開源為 Claude Code 專用的多供應商本機模型轉發站與 429 自動備援工具。你可以在不中斷工作、不浪費長對話快取的前提下，將單一對話或 `haiku` 子代理靈活分流至 Claude、GLM（`z.ai`）、Gemini（透過本地端 Gateway）、DeepSeek、Kimi、MiniMax 或 OpenRouter。
@@ -25,5 +37,6 @@
 
 - **舊版 `custom_agent` 子程序工具：** 移除已棄用的 `claude.exe -p` 子程序包裝程式碼，讓外掛專注於純粹、零額外負擔的 HTTP 模型轉發與對話路由。
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.3.0...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cablate/model-relay/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cablate/model-relay/releases/tag/v0.3.0

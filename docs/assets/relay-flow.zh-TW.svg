@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="410" viewBox="0 0 960 410" role="img" aria-label="動畫：620k token 的長對話撞上 429 額度上限；model-relay 當場無縫切換至 GLM 5.3 並固定該對話。10 分鐘後 Claude 恢復時，只有新開的視窗回到 Claude，長對話固定留在 GLM 免重建 620k 快取">
+  <defs>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="0.5" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+    <style>
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", monospace; }
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", Helvetica, Arial, sans-serif; }
+      .t { fill: #e2e8f0; font-size: 14px; }
+      .m { fill: #94a3b8; font-size: 13px; }
+      .s1 { animation: s1 12s linear infinite; } @keyframes s1 { 0%, 100% { opacity: 1; } }
+      .s2 { animation: s2 12s linear infinite; } @keyframes s2 { 0%, 18% { opacity: 0; } 22%, 95% { opacity: 1; } 98%, 100% { opacity: 0; } }
+      .s3 { animation: s3 12s linear infinite; } @keyframes s3 { 0%, 34% { opacity: 0; } 38%, 95% { opacity: 1; } 98%, 100% { opacity: 0; } }
+      .s4 { animation: s4 12s linear infinite; } @keyframes s4 { 0%, 52% { opacity: 0; } 56%, 95% { opacity: 1; } 98%, 100% { opacity: 0; } }
+      .s5 { animation: s5 12s linear infinite; } @keyframes s5 { 0%, 70% { opacity: 0; } 74%, 95% { opacity: 1; } 98%, 100% { opacity: 0; } }
+      .st0 { animation: st0 12s linear infinite; } @keyframes st0 { 0%, 34% { opacity: 1; } 36%, 100% { opacity: 0; } }
+      .st1 { animation: st1 12s linear infinite; } @keyframes st1 { 0%, 35% { opacity: 0; } 38%, 95% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    </style>
+  </defs>
+
+  <rect width="960" height="410" rx="18" fill="#0d1117"/>
+
+  <!-- 左側視窗：終端機 1（已經跑了 620k 的長對話） -->
+  <rect x="24" y="24" width="444" height="362" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <circle cx="46" cy="46" r="5" fill="#f87171"/>
+  <circle cx="64" cy="46" r="5" fill="#fbbf24"/>
+  <circle cx="82" cy="46" r="5" fill="#4ade80"/>
+  <text x="246" y="51" text-anchor="middle" class="sans m">視窗 1・進行中的長對話（620k context）</text>
+
+  <g class="s1">
+    <text x="44" y="92" class="mono t"><tspan fill="#38bdf8">›</tspan> 實作多供應商路由與預設集</text>
+    <text x="44" y="118" class="mono m">  Claude Opus：已更新 router/logic.js・12/12 測試通過</text>
+  </g>
+
+  <g class="s2">
+    <text x="44" y="156" class="mono t"><tspan fill="#38bdf8">›</tspan> 接著把輸入框上方的互動面板接起來</text>
+    <rect x="44" y="170" width="404" height="34" rx="8" fill="#2a1519" stroke="#f87171" stroke-width="1"/>
+    <text x="58" y="192" class="mono" font-size="13" fill="#fca5a5">⚡ Anthropic HTTP 429：已達 5 小時用量額度上限</text>
+  </g>
+
+  <g class="s3">
+    <rect x="44" y="216" width="404" height="58" rx="8" fill="#172033" stroke="#818cf8" stroke-width="1.5"/>
+    <text x="58" y="238" class="mono" font-size="13" fill="#c4b5fd">⇄ model-relay：當場自動備援 → glm (glm-5.3[1m])</text>
+    <text x="58" y="258" class="sans m">視窗 1 自動固定（Sticky）・自動剝除 ToolSearch 防呆</text>
+  </g>
+
+  <g class="s4">
+    <text x="44" y="302" class="mono t"><tspan fill="#4ade80">✓</tspan> GLM 5.3：已完成 hooks/panel.tsx・驗證通過</text>
+    <text x="44" y="326" class="sans m">  同一個請求直接由備援接手完成，對話完全不中斷。</text>
+  </g>
+
+  <!-- 底部狀態列 -->
+  <rect x="25" y="350" width="442" height="35" rx="10" fill="#0d1117"/>
+  <text x="44" y="372" class="mono m st0"><tspan fill="#38bdf8">●</tspan> 主線：Claude・context 620k</text>
+  <text x="44" y="372" class="mono m st1"><tspan fill="#a78bfa">●</tspan> 主線：glm-5.3[1m]（這個對話固定用它）・context 620k</text>
+
+  <!-- 右上卡片：10 分鐘後新對話自動回到 Claude -->
+  <rect x="492" y="24" width="444" height="172" rx="12" fill="#161b22" stroke="#38bdf8" stroke-width="1.5"/>
+  <circle cx="514" cy="46" r="5" fill="#f87171"/>
+  <circle cx="532" cy="46" r="5" fill="#fbbf24"/>
+  <circle cx="550" cy="46" r="5" fill="#4ade80"/>
+  <text x="714" y="51" text-anchor="middle" class="sans m">視窗 2・10 分鐘冷卻後新開的對話</text>
+
+  <text x="514" y="88" class="sans" font-size="15" font-weight="600" fill="#7dd3fc">冷卻結束後，新開的對話自動回到 Claude</text>
+  <text x="514" y="114" class="sans m">經過 cooldownMs（預設 10 分鐘）後，新對話會自動重試</text>
+  <text x="514" y="136" class="sans m">Anthropic；一旦回應正常，新對話立即恢復使用 Claude：</text>
+  <g class="s5">
+    <rect x="514" y="148" width="400" height="32" rx="7" fill="#0f2922" stroke="#34d399" stroke-width="1"/>
+    <text x="528" y="169" class="mono" font-size="12.5" fill="#6ee7b7">✓ 探測 200 OK → 視窗 2 自動恢復走 Claude Opus</text>
+  </g>
+
+  <!-- 右下卡片：為什麼視窗 1 固定留在 GLM 不切回 -->
+  <rect x="492" y="214" width="444" height="172" rx="12" fill="#161b22" stroke="url(#accent)" stroke-width="1.5"/>
+  <text x="514" y="244" class="sans" font-size="15" font-weight="600" fill="#e2e8f0">為什麼視窗 1 固定留在 GLM？（保護長對話快取）</text>
+  <text x="514" y="270" class="sans m">不同供應商的快取無法互通。如果把 620k 的視窗 1 自動</text>
+  <text x="514" y="292" class="sans m">切回 Claude，下一則訊息會在 Claude 全價重建 620k 快取，</text>
+  <text x="514" y="314" class="sans m">瞬間燒光剛恢復的額度。</text>
+
+  <rect x="514" y="328" width="400" height="40" rx="8" fill="#172033" stroke="#30363d"/>
+  <text x="528" y="353" class="mono" font-size="12.5" fill="#7dd3fc">🛡 對話黏著保護：視窗 1 固定留在 GLM，省下 620k 快取重建</text>
+</svg>
