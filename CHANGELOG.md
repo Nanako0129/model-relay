@@ -6,6 +6,10 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A provider or Anthropic answer that drops mid-stream no longer leaves Claude Code waiting with no reply, and a connection reset mid-stream no longer crashes the router when retries are on: the caller's connection is cut so it sees the failure. A caller that gives up (Esc) now stops the upstream request instead of letting it run to the end.
+
 ## [0.6.0] - 2026-10-20
 
 Use Remote Control without losing the relay (`proxy.enabled` with a local CA constrained to `api.anthropic.com`), point `haiku` / `sonnet` / `opus` aliases at any provider in one command (`setup.mjs alias` & `/provider alias`), and spawn provider subagents on the fly (`subagent_type: "model-relay:<name>"`) without `.claude/agents/*.md` files or restarting your session. The `/provider` panel also adds live toggles for 429 failover (`failover.chain`), retries (`retry.enabled`), and Remote Control (`f` / `t` / `x`).
