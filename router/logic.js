@@ -32,7 +32,7 @@ function unresolvedEnv(raw, env = process.env) {
 function cfgMissingMessage(unresolved) {
   if (!unresolved.length) return 'model-relay.json / custom-agent.json is missing or invalid'
   const list = unresolved.map((u) => `${u.provider} (${u.env ? `${u.env} is unset in the router process` : 'its token "env:" names no variable'})`).join(', ')
-  return `model-relay: no provider is usable; skipped ${list}. Export the variable(s), then restart the router (it keeps the environment it was started with)`
+  return `no provider is usable; skipped ${list}. Export the variable(s), then restart the router (it keeps the environment it was started with)`
 }
 
 function defaultPrefixRegex(name, model) {

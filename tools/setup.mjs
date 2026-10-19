@@ -856,7 +856,7 @@ if (cmd === 'rc') {
           for (const u of Array.isArray(h.unresolved) ? h.unresolved : []) {
             console.log(process.env[u.env]
               ? `  ⚠ The running router was started without ${u.env}, so provider ${u.provider} is skipped there although this shell has it. Stop the router (kill ${h.pid}) and start Claude Code from this shell so the new router inherits it`
-              : `  ⚠ Provider ${u.provider} is skipped by the running router: ${u.env || 'its env: token names no variable'} is unset here too`)
+              : `  ⚠ Provider ${u.provider} is skipped by the running router: ${u.env ? `${u.env} is unset here too` : 'its token "env:" names no variable'}`)
           }
         } catch {
           console.log(`  Router health: ${rawHealth}`)
