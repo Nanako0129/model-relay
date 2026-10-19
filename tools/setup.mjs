@@ -17,6 +17,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import http from 'node:http'
 import https from 'node:https'
+import net from 'node:net'
 import tls from 'node:tls'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -65,8 +66,6 @@ function resolveActiveCfgPath() {
   if (fs.existsSync(legacyCfgPath)) return legacyCfgPath
   return relayCfgPath
 }
-
-const isPort = (n) => Number.isInteger(n) && n > 1024 && n < 65536
 
 const NO_PROXY_LOCAL = '127.0.0.1,localhost,::1'
 
@@ -293,7 +292,7 @@ const names = (v) => v.split(',').map((s) => s.trim().toLowerCase()).filter(Bool
 // Every key "set" understands; the panel and the CLI go through this one table
 const SETTABLE = {
   port: { parse: (v) => {
-    if (!/^\d+$/.test(v) || !isPort(Number(v))) throw new Error('expected a port from 1025 to 65535')
+    if (!/^\d+$/.test(v) || !L.isPort(Number(v))) throw new Error('expected a port from 1025 to 65535')
     return Number(v)
   }, hint: '1025-65535 — the router\'s port; restart the router afterwards (settings.json is rewired for you)' },
   'failover.enabled': { parse: bool, hint: 'on|off — switch to the failover chain when Claude hits its usage limit' },
@@ -498,23 +497,38 @@ if (cmd === 'set') {
     process.exit(0)
   }
   const oldPort = relayPort()
+  if (key === 'port' && next !== oldPort) {
+    // Never move onto a port something already answers on: the hook would start a router that cannot bind it
+    const h = await fetchHealth(next)
+    if (h || (await portOpen(next))) {
+      console.error(`port: ${next} is already in use (${h ? `a model-relay router${h.configDir ? ` for config dir ${h.configDir}` : ''}, pid ${h.pid}` : 'another process'}); nothing was changed. Pick another port.`)
+      process.exit(1)
+    }
+  }
   saveRaw(loaded.file, config, 'relay-backup')
   if (notes.length) console.log(`(also moved the config to the current layout: ${notes.length} change${notes.length > 1 ? 's' : ''})`)
   if (key === 'port') {
-    console.log(`✓ port: ${oldPort} → ${next}. The running router keeps port ${oldPort} until it is restarted (stop it, or restart Claude Code); the new port applies from then on.`)
+    console.log(`✓ port: ${oldPort} → ${next}. The running router keeps port ${oldPort} until it is stopped; the router started after that uses ${next}.`)
     // Point Claude Code at the new port the way doctor --fix would, keeping the mode it was in
     let s = null
+    let bad = null
     try {
       s = readSettings()
-    } catch {}
+    } catch (e) {
+      bad = e.message
+    }
     const mode = s ? wiringMode(s, oldPort) : 'none'
-    if (mode === 'none') console.log(`  settings.json does not point at the relay on ${oldPort}; run "node tools/setup.mjs doctor --fix" to wire it to ${next}`)
+    if (bad) console.log(`  settings.json is not valid JSON (${bad}); fix it, then run "node tools/setup.mjs doctor --fix" to wire it to ${next}`)
+    else if (mode === 'none') console.log(`  settings.json does not point at the relay on ${oldPort}; run "node tools/setup.mjs doctor --fix" to wire it to ${next}`)
     else {
       const url = `http://127.0.0.1:${next}`
       s.env = { ...s.env, ...(mode === 'proxy' ? { HTTPS_PROXY: url } : { ANTHROPIC_BASE_URL: url }) }
       const backup = writeSettings(s)
       console.log(`  settings.json updated: ${mode === 'proxy' ? 'HTTPS_PROXY' : 'ANTHROPIC_BASE_URL'}=${url}${backup ? ` (previous copy: ${backup})` : ''}; new Claude Code sessions use it`)
     }
+    // Not killed for you: the plugin hook starts a second router on the new port, so the old one should be stopped by hand
+    const old = await fetchHealth(oldPort)
+    if (old && old.pid && !foreignRouter(old, oldPort)) console.log(`  The router still on port ${oldPort} is pid ${old.pid}; stop it with "kill ${old.pid}" (a new one starts on ${next} with your next Claude Code session).`)
     process.exit(0)
   }
   console.log(`✓ ${key}: ${before === undefined ? 'default' : JSON.stringify(before)} → ${next === undefined ? 'default' : JSON.stringify(next)} (the router reads this on its next request; no restart)`)
@@ -597,11 +611,21 @@ if (cmd === 'remove') {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
+// Does anything accept connections on this port?
+function portOpen(port) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ host: '127.0.0.1', port, timeout: 1000 })
+    sock.on('connect', () => (sock.destroy(), resolve(true)))
+    sock.on('error', () => resolve(false))
+    sock.on('timeout', () => (sock.destroy(), resolve(false)))
+  })
+}
+
 function relayPort() {
   try {
     const raw = JSON.parse(fs.readFileSync(resolveActiveCfgPath(), 'utf8'))
     // parseCfg gives up on a config whose env tokens are not set yet (a fresh install), but the port is still the file's
-    return L.parseCfg(raw)?.port ?? (isPort(raw.port) ? raw.port : 8950)
+    return L.parseCfg(raw)?.port ?? (L.isPort(raw.port) ? raw.port : 8950)
   } catch {
     return 8950
   }
@@ -630,17 +654,13 @@ function fetchHealth(port) {
 
 // A router that answers on our port but was started for another config directory (or by an older version that does
 // not say) uses a different config, PKI and tokens; returns a sentence about it, or null when it is ours
-const realDir = (d) => {
-  try {
-    return fs.realpathSync(d)
-  } catch {
-    return path.resolve(d)
-  }
-}
 function foreignRouter(h, port) {
-  if (!h || (h.configDir && realDir(h.configDir) === realDir(cfgDir))) return null
-  return `the router answering on 127.0.0.1:${port} (pid ${h.pid}) belongs to ${h.configDir ? `config dir ${h.configDir}` : 'an unknown config dir (an older router that does not report it)'}, not to ${cfgDir}; it uses that directory's config and certificates. Stop it or give one of them another port ("node tools/setup.mjs set port <n>").`
+  if (!h || !h.configDir || L.sameDir(h.configDir, cfgDir)) return null
+  return `the router answering on 127.0.0.1:${port} (pid ${h.pid}) belongs to config dir ${h.configDir}, not to ${cfgDir}; it uses that directory's config and certificates. Stop it or give one of them another port ("node tools/setup.mjs set port <n>").`
 }
+// An older router does not report its config dir; it is most likely ours, so it is restarted, not refused
+const olderRouter = (h) => Boolean(h && h.pid && !h.configDir)
+const olderNote = (port) => `an older model-relay router (no configDir) answers on 127.0.0.1:${port}; restart it to pick up this version`
 
 // Starts the router when it is down and waits until it answers
 async function ensureRouter(port) {
@@ -712,6 +732,7 @@ if (cmd === 'proxy') {
     const h = await fetchHealth(port)
     const foreign = foreignRouter(h, port)
     if (foreign) console.log(`⚠ ${foreign}`)
+    else if (olderRouter(h)) console.log(`⚠ ${olderNote(port)}`)
     console.log(`Claude Code is wired to the relay as: ${mode === 'proxy' ? 'HTTPS proxy (Remote Control works)' : mode === 'base-url' ? 'API address (ANTHROPIC_BASE_URL; Remote Control refuses to start)' : 'nothing (run "doctor --fix" or "proxy enable --go")'}`)
     console.log(`Certificate: ${st.complete ? `leaf valid until ${day(st.leafExpires)}${st.renewDue ? ' — renewal due, run "proxy renew --go"' : ''}` : 'not created yet (created by "proxy enable --go")'}`)
     console.log(`Router: ${h ? `up on ${port}, ${h.proxy ? `proxy ${h.proxy.enabled ? 'on' : 'off'}, ${h.proxy.mitm} routed / ${h.proxy.tunnel} tunnelled connections since start` : 'running OLD code without proxy support — restart it ("proxy enable --go" does that)'}` : `offline on ${port}`}`)
@@ -911,6 +932,7 @@ if (cmd === 'rc') {
           const foreign = foreignRouter(h, cfg.port)
           if (foreign) console.log(`  Router health: ⚠ ${foreign}`)
           else {
+            if (olderRouter(h)) console.log(`  Router health: ⚠ ${olderNote(cfg.port)}`)
           const foState = h.failoverSince ? `active since ${new Date(h.failoverSince).toISOString().slice(11, 19)}Z` : 'idle'
           const pxState = h.proxy ? `proxy ${h.proxy.enabled ? 'on' : 'off'} (${h.proxy.mitm} routed / ${h.proxy.tunnel} tunnelled)` : 'no proxy'
           console.log(`  Router health: ✓ up on 127.0.0.1:${cfg.port} (pid ${h.pid}, pinned sessions: ${h.sessionsOnCustom ?? 0}, 429 failover: ${foState}, ${pxState})`)

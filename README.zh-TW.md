@@ -48,7 +48,7 @@ claude plugin install model-relay@model-relay
 初始化 `~/.claude/model-relay.json`、自動將 `ANTHROPIC_BASE_URL` 寫入 `~/.claude/settings.json`，並用一行指令實測所有上游供應商連線：
 
 ```bash
-cd ~/.claude/plugins/cache/model-relay/model-relay/0.6.0   # 外掛的安裝目錄（見下方說明）
+cd ~/.claude/plugins/cache/model-relay/model-relay/<version>   # 外掛的安裝目錄（見下方說明）
 node tools/setup.mjs init --fix
 export ZAI_API_KEY="your-api-key"
 node tools/setup.mjs doctor --ping
@@ -158,7 +158,7 @@ node tools/setup.mjs rc
 
 | 欄位 | 預設值 | 說明 |
 |---|---|---|
-| `port` | `8950` | 本機轉發站監聽的連接埠（`1025`–`65535`）。用 `node tools/setup.mjs set port <n>` 修改，會一併更新 `settings.json`；執行中的轉發站要重新啟動才會換埠 |
+| `port` | `8950` | 本機轉發站監聽的連接埠（`1025`–`65535`）。用 `node tools/setup.mjs set port <n>` 修改，會一併更新 `settings.json`；已在執行的轉發站會一直用舊埠直到你把它停掉（指令會印出它的 pid），且會拒絕已有程式在回應的埠 |
 | `claudeUrl` | `"https://api.anthropic.com"` | 上游 Anthropic API 網址 |
 | `proxy.enabled` | `false` | 接受為 Remote Control 而來的 HTTPS 代理連線。預設關閉。開啟後，對 `api.anthropic.com` 以外任何主機的 `CONNECT` 都是盲轉送（blind tunnel），本機任何程序都能使用；`node tools/setup.mjs proxy enable --go` 開啟、`proxy disable --go` 關閉 |
 | `failover.enabled` | `true` | 遇到 Claude 429 額度用完時是否自動切換至備援名單 |

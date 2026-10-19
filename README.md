@@ -48,7 +48,7 @@ claude plugin install model-relay@model-relay
 Initialize `~/.claude/model-relay.json`, wire `ANTHROPIC_BASE_URL` into `~/.claude/settings.json`, and verify your upstream providers with one command:
 
 ```bash
-cd ~/.claude/plugins/cache/model-relay/model-relay/0.6.0   # the plugin's install directory (see below)
+cd ~/.claude/plugins/cache/model-relay/model-relay/<version>   # the plugin's install directory (see below)
 node tools/setup.mjs init --fix
 export ZAI_API_KEY="your-api-key"
 node tools/setup.mjs doctor --ping
@@ -158,7 +158,7 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 
 | Field | Default | Meaning |
 |---|---|---|
-| `port` | `8950` | Localhost port for the relay HTTP server (`1025`–`65535`). Change it with `node tools/setup.mjs set port <n>`, which also updates `settings.json`; the running router keeps its old port until restarted |
+| `port` | `8950` | Localhost port for the relay HTTP server (`1025`–`65535`). Change it with `node tools/setup.mjs set port <n>`, which also updates `settings.json`; the router already running keeps the old port until you stop it (the command prints its pid), and it refuses a port that already answers |
 | `claudeUrl` | `"https://api.anthropic.com"` | Upstream Anthropic API base URL |
 | `proxy.enabled` | `false` | Accept HTTPS-proxy connections for Remote Control. Off by default. When on, a `CONNECT` to any host other than `api.anthropic.com` is a blind tunnel that any local process can use; `node tools/setup.mjs proxy enable --go` turns it on and `proxy disable --go` off |
 | `failover.enabled` | `true` | Automatically switch to the failover chain on Claude 429 usage limits |

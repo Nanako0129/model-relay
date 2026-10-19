@@ -8,18 +8,20 @@
 
 ### 新增
 
-- **`setup.mjs set port <n>`：** 修改轉發站連接埠（`1025`–`65535`），保留 `.relay-backup` 備份，並同步改寫 `settings.json`（`ANTHROPIC_BASE_URL`，代理模式則是 `HTTPS_PROXY`，照例備份）。執行中的轉發站要重新啟動才會換埠。
-- **`/__health` 回報 `configDir`：** 轉發站是為哪個設定目錄啟動的，讓 `doctor` 與 `proxy` 能分辨連接埠上回應的是誰的轉發站。
+- **`setup.mjs set port <n>`：** 修改轉發站連接埠（`1025`–`65535`），保留 `.relay-backup` 備份，並同步改寫 `settings.json`（`ANTHROPIC_BASE_URL`，代理模式則是 `HTTPS_PROXY`，照例備份）。會拒絕已有程式在回應的埠。已在執行的轉發站會一直用舊埠直到你把它停掉；指令會印出它的 pid，但不會替你結束它。
+- **`/__health` 回報 `configDir`：** 轉發站是為哪個設定目錄啟動的，讓 `doctor`、`proxy` 與外掛 hook 能分辨連接埠上回應的是誰的轉發站。路徑以實際路徑比對，Windows 上不分大小寫。
 
 ### 變更
 
-- **轉發站拿不到連接埠時會說明原因：** 遇到 `EADDRINUSE`，只有佔用者回報相同設定目錄時才靜默結束；否則把連接埠與另一個設定目錄（或未知程序）寫進 `custom-agent-router.log`，並以非零狀態結束。
-- **`doctor`、`proxy status` 與 `proxy enable|renew` 會察覺別人的轉發站：** 連接埠上的轉發站屬於其他設定目錄，或是不回報目錄的舊版時，`doctor` 與 `proxy status` 會警告、`proxy enable|renew` 會拒絕並指出兩個目錄，且在變更任何東西之前。
+- **轉發站拿不到連接埠時會說明原因：** 遇到 `EADDRINUSE`，只有佔用者回報相同設定目錄時才靜默結束；否則把連接埠與另一個設定目錄（或未知程序）寫進 `custom-agent-router.log`，並以非零狀態結束。不回報設定目錄的是舊版轉發站，照舊不去動它。
+- **`doctor`、`proxy status` 與 `proxy enable|renew` 會察覺別人的轉發站：** 連接埠上的轉發站屬於其他設定目錄時，`doctor` 與 `proxy status` 會警告、`proxy enable|renew` 會拒絕並指出兩個目錄，且在變更任何東西之前。不回報目錄的是舊版轉發站：`doctor` 會請你重新啟動它，`proxy enable` 照舊替你重啟。
+- **外掛 hook 不會經由其他設定目錄的轉發站轉送：** 連接埠上的轉發站回報了不同的設定目錄時，這個對話改為直連 Claude，狀態列會指出另一個目錄。沒有回報目錄的仍視為你自己的。
 - **README：** 說明 `tools/setup.mjs` 的位置與執行方式、`env:VAR` token 讀的是轉發站自己的環境、範例設定會把所有 `haiku` 呼叫送到 GLM、自動直連退路只在 `ANTHROPIC_BASE_URL` 模式有效、`HTTPS_PROXY` 也會套用到 `git`／`curl`／`gh`、`proxy.enabled` 實際開放了什麼、CI 實際測了什麼，以及完整的移除清單。
 
 ### 修正
 
 - **`init --fix` 寫死連接埠 8950：** 改為寫入設定檔中的連接埠。
+- **設定檔的 `env:` token 未設定時，轉發站會綁到 8950、並對任何主機開放 `CONNECT`：** 現在轉發站會綁設定檔自己的連接埠，沒有可用設定時對 `CONNECT` 的處理和代理模式關閉時相同（拒絕）。
 - **`custom-agent-router.log` 無限成長：** 現在和 `custom-agent-requests.log` 一樣超過 5 MB 就清空，與文件一致。
 
 ## [0.6.0] - 2026-10-20

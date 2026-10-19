@@ -1,6 +1,7 @@
 'use strict'
 const test = require('node:test')
 const assert = require('node:assert')
+const os = require('node:os')
 const L = require('./logic')
 
 const cfg = L.parseCfg({ baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3[1m]' })
@@ -213,4 +214,12 @@ test('inside the opened tunnel only model calls are routed', () => {
   for (const [m, u] of [['GET', '/v1/messages'], ['POST', '/v1/oauth/token'], ['POST', '/v1/messagesX'], ['GET', '/api/oauth/profile'], ['POST', '/v1/code/sessions'], ['POST', undefined]]) {
     assert.strictEqual(L.isRoutedRequest(m, u), false, `${m} ${u}`)
   }
+})
+
+test('directories compare by real path, and case-insensitively only on Windows', () => {
+  assert.strictEqual(L.sameDir('c:\\Users\\x\\.claude', 'C:\\Users\\X\\.claude', true), true)
+  assert.strictEqual(L.sameDir('c:\\Users\\x\\.claude', 'C:/users/x/.claude', true), true)
+  assert.strictEqual(L.sameDir('/tmp/Relay-A', '/tmp/relay-a', false), false)
+  assert.strictEqual(L.sameDir(os.tmpdir(), os.tmpdir() + '/', false), true)
+  assert.strictEqual(L.isPort(1025) && L.isPort(65535) && !L.isPort(1024) && !L.isPort(65536) && !L.isPort('8950'), true)
 })
