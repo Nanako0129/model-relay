@@ -787,16 +787,7 @@ if (cmd === 'rc') {
     process.exit(1)
   }
 
-  // Check for unset env:VAR tokens in raw.providers
-  const skippedEnv = []
-  if (raw && typeof raw.providers === 'object' && raw.providers !== null) {
-    for (const [k, v] of Object.entries(raw.providers)) {
-      if (v && typeof v.token === 'string' && v.token.startsWith('env:')) {
-        const varName = v.token.slice(4).trim()
-        if (!process.env[varName]) skippedEnv.push(`${k} (${varName} is unset)`)
-      }
-    }
-  }
+  const skippedEnv = L.unresolvedEnv(raw, process.env).map((u) => `${u.provider} (${u.env ? `${u.env} is unset` : 'token "env:" names no variable'})`)
 
   const cfg = L.parseCfg(raw)
   if (!cfg) {
@@ -862,9 +853,10 @@ if (cmd === 'rc') {
           const pxState = h.proxy ? `proxy ${h.proxy.enabled ? 'on' : 'off'} (${h.proxy.mitm} routed / ${h.proxy.tunnel} tunnelled)` : 'no proxy'
           console.log(`  Router health: ✓ up on 127.0.0.1:${cfg.port} (pid ${h.pid}, pinned sessions: ${h.sessionsOnCustom ?? 0}, 429 failover: ${foState}, ${pxState})`)
           // the router resolves env:VAR from the environment it was started with, which may differ from this shell's
-          if (Array.isArray(h.unresolved) && h.unresolved.length) {
-            const list = h.unresolved.map((u) => `${u.provider} (${u.env})`).join(', ')
-            console.log(`  ⚠ The running router has no value for ${list}: it was started without that variable, so those providers are skipped there. Export it in the shell, stop the router (kill ${h.pid}) and start Claude Code from that shell so the new router inherits it`)
+          for (const u of Array.isArray(h.unresolved) ? h.unresolved : []) {
+            console.log(process.env[u.env]
+              ? `  ⚠ The running router was started without ${u.env}, so provider ${u.provider} is skipped there although this shell has it. Stop the router (kill ${h.pid}) and start Claude Code from this shell so the new router inherits it`
+              : `  ⚠ Provider ${u.provider} is skipped by the running router: ${u.env || 'its env: token names no variable'} is unset here too`)
           }
         } catch {
           console.log(`  Router health: ${rawHealth}`)

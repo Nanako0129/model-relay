@@ -40,6 +40,7 @@ let lastGoodCfg = null
 // env:VAR tokens that did not resolve in THIS process (a router started before the key was exported never sees it)
 let unresolved = []
 const readCfg = () => {
+  unresolved = [] // a file that cannot be read or parsed must not be blamed on an env var
   try {
     const raw = JSON.parse(fs.readFileSync(resolveCfgPath(), 'utf8'))
     unresolved = L.unresolvedEnv(raw)
@@ -431,7 +432,15 @@ function mitmServer() {
     mitmCache.checkedAt = now
     return mitmCache.server
   }
-  const srv = https.createServer({ key: leaf.key, cert: leaf.cert, ALPNProtocols: ['http/1.1'] }, (req, res) => dispatch(req, res, true))
+  let srv
+  try {
+    srv = https.createServer({ key: leaf.key, cert: leaf.cert, ALPNProtocols: ['http/1.1'] }, (req, res) => dispatch(req, res, true))
+  } catch (e) {
+    // key and certificate read mid-renewal do not match; tunnel for this call and try again on the next
+    if (mitmCache?.failed !== e.message) log(`proxy: certificate unusable (${e.message}); api.anthropic.com is tunnelled unrouted until it is renewed`)
+    mitmCache = { server: null, cert: '', checkedAt: 0, failed: e.message }
+    return null
+  }
   srv.on('upgrade', tunnelUpgrade)
   srv.on('tlsClientError', (e) => {
     if (Date.now() - lastTlsError < 60000) return

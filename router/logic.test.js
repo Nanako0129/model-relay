@@ -224,3 +224,10 @@ test('unset env:VAR tokens are reported by name, and explained when no provider 
   assert.match(msg, /restart the router/)
   assert.ok(!msg.includes('config missing'))
 })
+
+test('unresolvedEnv skips keys parseCfg ignores and flags a bare "env:"', () => {
+  const p = (token) => ({ token, baseUrl: 'http://127.0.0.1:1', model: 'm' })
+  assert.deepStrictEqual(L.unresolvedEnv({ providers: { claude: p('env:A'), ' ': p('env:B'), x: p('env:') } }, {}), [{ provider: 'x', env: '' }])
+  assert.match(L.cfgMissingMessage([{ provider: 'x', env: '' }]), /x \(its token "env:" names no variable\)/)
+  assert.deepStrictEqual(L.unresolvedEnv({ baseUrl: 'http://127.0.0.1:1', token: 'env:LEG', model: 'm' }, {}).map((u) => u.env), ['LEG'])
+})
