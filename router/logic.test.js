@@ -215,26 +215,40 @@ test('inside the opened tunnel only model calls are routed', () => {
   }
 })
 
-test('the plain-HTTP side answers only loopback Host names on the bound port, and only loopback Origins', () => {
-  for (const host of ['127.0.0.1:9123', 'localhost:9123', 'LocalHost:9123', '[::1]:9123']) {
+test('the plain-HTTP side answers only local programs: loopback Host on the bound port, no browser markers', () => {
+  for (const host of ['127.0.0.1:9123', 'localhost:9123', 'LocalHost:9123']) {
     assert.strictEqual(L.isLocalRequest({ host }, 9123), true, host)
   }
-  for (const origin of ['http://127.0.0.1:9123', 'http://localhost:3000', 'https://[::1]']) {
-    assert.strictEqual(L.isLocalRequest({ host: '127.0.0.1:9123', origin }, 9123), true, origin)
-  }
+  assert.strictEqual(L.isLocalRequest({ host: '127.0.0.1:9123', 'sec-fetch-mode': 'cors' }, 9123), true, "Node's fetch sends sec-fetch-mode: cors")
+  const local = { host: '127.0.0.1:9123' }
   const refused = [
     [{ host: 'evil.test:9123' }, 'another host (DNS rebinding)'],
     [{ host: 'evil.test@127.0.0.1:9123' }, 'userinfo trick'],
     [{ host: '127.0.0.1.evil.test:9123' }, 'loopback as a prefix'],
+    [{ host: '[::1]:9123' }, 'IPv6 loopback: the router never listens there'],
     [{ host: '127.0.0.1:9124' }, 'wrong port'],
     [{ host: '127.0.0.1' }, 'no port'],
     [{}, 'missing Host'],
-    [{ host: '127.0.0.1:9123', origin: 'https://evil.test' }, 'foreign Origin'],
-    [{ host: '127.0.0.1:9123', origin: 'http://127.0.0.1.evil.test' }, 'loopback-looking Origin'],
-    [{ host: '127.0.0.1:9123', origin: 'null' }, 'Origin null'],
-    [{ host: '127.0.0.1:9123', origin: '' }, 'empty Origin'],
+    [{ ...local, origin: 'https://evil.test' }, 'foreign Origin'],
+    [{ ...local, origin: 'http://localhost:3000' }, 'another local server'],
+    [{ ...local, origin: 'http://127.0.0.1:9123' }, 'even our own origin: no browser page is a client'],
+    [{ ...local, origin: 'null' }, 'Origin null'],
+    [{ ...local, origin: '' }, 'empty Origin'],
+    [{ ...local, 'sec-fetch-site': 'cross-site' }, 'no-cors GET from a page (<img>) carries no Origin'],
   ]
   for (const [headers, why] of refused) assert.strictEqual(L.isLocalRequest(headers, 9123), false, why)
+})
+
+test('a session id of "__proto__" is an ordinary sticky entry', () => {
+  const c = L.parseCfg({ providers: { glm: { token: 't' } } })
+  let s = L.setSticky(L.emptyState(), '__proto__', 'glm', 1)
+  assert.strictEqual(L.getSessionProvider(s, c, '__proto__'), 'glm')
+  assert.deepStrictEqual(Object.keys(s.sticky), ['__proto__'])
+  assert.strictEqual(L.getSessionProvider(s, c, 'other'), 'claude', 'other sessions are not affected')
+  s = L.parseState(JSON.parse(JSON.stringify(L.pruneSticky(s, 2))))
+  assert.strictEqual(L.getSessionProvider(s, c, '__proto__'), 'glm', 'survives a save and reload')
+  s = L.setSticky(s, '__proto__', 'claude', 3)
+  assert.deepStrictEqual(Object.keys(s.sticky), [])
 })
 
 test('Object.prototype names never resolve to a provider', () => {

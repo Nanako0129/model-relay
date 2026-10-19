@@ -294,17 +294,17 @@ function proxyAction(proxyCfg, target, haveCert) {
   return target.host === PROXY_MITM_HOST && target.port === 443 && haveCert ? 'mitm' : 'tunnel'
 }
 
-// The plain-HTTP side of the router serves only this machine. A web page can still reach 127.0.0.1 (a simple
-// text/plain POST needs no preflight, and DNS rebinding puts a foreign name on our address), so the Host header
-// must name a loopback address on the port actually bound, and a browser Origin, when present, must be loopback too.
-// Origin "null" (sandboxed frames, file pages) is foreign.
-const LOCAL_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})$/i
-const LOCAL_ORIGIN_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?$/i
+// The plain-HTTP side of the router serves only local programs (Claude Code, the plugin, setup.mjs), none of which
+// is a browser. A web page can still reach 127.0.0.1: a simple text/plain POST needs no preflight, an <img> GET
+// carries no Origin, and DNS rebinding puts a foreign name on our address. So the Host header must name 127.0.0.1 or
+// localhost on the port actually bound, and a browser marker (Origin, Sec-Fetch-Site) is refused, even from another
+// local server such as localhost:3000. Browsers send Sec-Fetch-Site on every request to a loopback URL; Sec-Fetch-Mode
+// is not a browser marker, because Node's built-in fetch sends "sec-fetch-mode: cors" on every request.
+const LOCAL_HOST_RE = /^(127\.0\.0\.1|localhost):(\d{1,5})$/i
 function isLocalRequest(headers, port) {
   const m = LOCAL_HOST_RE.exec(String((headers && headers.host) || ''))
   if (!m || Number(m[2]) !== port) return false
-  const origin = headers.origin
-  return origin === undefined || LOCAL_ORIGIN_RE.test(String(origin))
+  return headers.origin === undefined && headers['sec-fetch-site'] === undefined
 }
 
 // Inside the opened-up tunnel only model calls are for the router. Token refresh, profile lookups, Remote Control
@@ -396,9 +396,10 @@ function isUsageLimit(status, headers, bodyText) {
   return /usage limit|limit reached|hit your limit|limit (will )?resets?/i.test(bodyText || '')
 }
 
-// `sticky` maps sessionId -> { provider, at }
+// `sticky` maps sessionId -> { provider, at }. Session ids come from request headers and /__session, so the map has
+// no prototype: a sid of "__proto__" is an ordinary entry instead of replacing the object's prototype.
 function emptyState() {
-  return { failoverSince: 0, nextClaudeTry: 0, sticky: {} }
+  return { failoverSince: 0, nextClaudeTry: 0, sticky: Object.create(null) }
 }
 
 function parseState(raw) {
@@ -407,7 +408,7 @@ function parseState(raw) {
   if (typeof raw.failoverSince === 'number') s.failoverSince = raw.failoverSince
   if (typeof raw.nextClaudeTry === 'number') s.nextClaudeTry = raw.nextClaudeTry
 
-  const sticky = {}
+  const sticky = Object.create(null)
   if (typeof raw.onGlm === 'object' && raw.onGlm !== null) {
     for (const [sid, t] of Object.entries(raw.onGlm)) {
       if (typeof t === 'number') sticky[sid] = { provider: 'glm', at: t }
@@ -432,7 +433,7 @@ const STICKY_TTL_MS = 7 * 24 * 3600e3
 
 function pruneSticky(state, now) {
   const base = parseState(state)
-  const sticky = {}
+  const sticky = Object.create(null)
   for (const [sid, entry] of Object.entries(base.sticky)) {
     if (now - entry.at < STICKY_TTL_MS) sticky[sid] = entry
   }
@@ -442,7 +443,7 @@ function pruneSticky(state, now) {
 function setSticky(state, sid, provider, now) {
   if (!sid) return state
   const base = parseState(state)
-  const sticky = { ...base.sticky }
+  const sticky = Object.assign(Object.create(null), base.sticky)
   if (!provider || provider === 'claude') {
     delete sticky[sid]
   } else {
