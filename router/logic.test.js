@@ -214,3 +214,38 @@ test('inside the opened tunnel only model calls are routed', () => {
     assert.strictEqual(L.isRoutedRequest(m, u), false, `${m} ${u}`)
   }
 })
+
+test('the plain-HTTP side answers only loopback Host names on the bound port, and only loopback Origins', () => {
+  for (const host of ['127.0.0.1:9123', 'localhost:9123', 'LocalHost:9123', '[::1]:9123']) {
+    assert.strictEqual(L.isLocalRequest({ host }, 9123), true, host)
+  }
+  for (const origin of ['http://127.0.0.1:9123', 'http://localhost:3000', 'https://[::1]']) {
+    assert.strictEqual(L.isLocalRequest({ host: '127.0.0.1:9123', origin }, 9123), true, origin)
+  }
+  const refused = [
+    [{ host: 'evil.test:9123' }, 'another host (DNS rebinding)'],
+    [{ host: 'evil.test@127.0.0.1:9123' }, 'userinfo trick'],
+    [{ host: '127.0.0.1.evil.test:9123' }, 'loopback as a prefix'],
+    [{ host: '127.0.0.1:9124' }, 'wrong port'],
+    [{ host: '127.0.0.1' }, 'no port'],
+    [{}, 'missing Host'],
+    [{ host: '127.0.0.1:9123', origin: 'https://evil.test' }, 'foreign Origin'],
+    [{ host: '127.0.0.1:9123', origin: 'http://127.0.0.1.evil.test' }, 'loopback-looking Origin'],
+    [{ host: '127.0.0.1:9123', origin: 'null' }, 'Origin null'],
+    [{ host: '127.0.0.1:9123', origin: '' }, 'empty Origin'],
+  ]
+  for (const [headers, why] of refused) assert.strictEqual(L.isLocalRequest(headers, 9123), false, why)
+})
+
+test('Object.prototype names never resolve to a provider', () => {
+  const c = L.parseCfg({ providers: { glm: { token: 't' } } })
+  for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    assert.strictEqual(c.providers[name], undefined, name)
+    const s = L.setSticky(L.emptyState(), 'sid', name, 1)
+    assert.strictEqual(L.getSessionProvider(s, c, 'sid'), 'claude', name)
+    assert.strictEqual(L.decide(s, c, OPUS, 'sid', 2), 'claude', name)
+    assert.strictEqual(L.parseRoute(`${name}-rewrite`, c).provider, null, name)
+    assert.strictEqual(L.nextFallback({ ...c, failoverChain: [name] }, 'glm', []), null, name)
+  }
+  assert.strictEqual(c.providers.glm.name, 'glm')
+})

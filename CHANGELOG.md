@@ -6,6 +6,11 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Web pages can no longer use the router:** the router used to answer any request that reached `127.0.0.1`, so a page open in a browser could send a plain `text/plain` POST to `/v1/messages` and spend your provider tokens, or use DNS rebinding to read answers and call `/__session`, `/__probe` and `/__ping`. Plain HTTP requests now need a `Host` of `127.0.0.1`, `localhost` or `[::1]` on the port the router is listening on, and a browser `Origin`, when sent, must be one of those addresses too (`Origin: null` is refused); anything else gets 403. Requests inside the `api.anthropic.com` proxy tunnel are not affected.
+- **Provider names such as `constructor` are no longer accepted:** names that exist on every JavaScript object (`constructor`, `toString`, `__proto__`) were treated as configured providers, so `/__session` could pin a session to one, and the next request from that session crashed the router. They are now unknown provider names.
+
 ## [0.6.0] - 2026-10-20
 
 Use Remote Control without losing the relay (`proxy.enabled` with a local CA constrained to `api.anthropic.com`), point `haiku` / `sonnet` / `opus` aliases at any provider in one command (`setup.mjs alias` & `/provider alias`), and spawn provider subagents on the fly (`subagent_type: "model-relay:<name>"`) without `.claude/agents/*.md` files or restarting your session. The `/provider` panel also adds live toggles for 429 failover (`failover.chain`), retries (`retry.enabled`), and Remote Control (`f` / `t` / `x`).

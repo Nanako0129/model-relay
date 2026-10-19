@@ -238,7 +238,9 @@ function parseCfg(raw, env = process.env) {
   const migrated = migrateConfig(raw).config
   if (!migrated) return null
   const retry = parseRetryCfg(migrated.retry)
-  const providers = {}
+  // No prototype: names arrive from config files, sticky state and /__session, and "constructor" or "toString"
+  // must never look up an inherited Object.prototype member as if it were a provider.
+  const providers = Object.create(null)
   for (const [k, v] of Object.entries(migrated.providers)) {
     const key = k.trim().toLowerCase()
     if (!key || key === 'claude') continue
@@ -290,6 +292,19 @@ function parseConnectTarget(authority) {
 function proxyAction(proxyCfg, target, haveCert) {
   if (!proxyCfg || !proxyCfg.enabled || !target) return 'refuse'
   return target.host === PROXY_MITM_HOST && target.port === 443 && haveCert ? 'mitm' : 'tunnel'
+}
+
+// The plain-HTTP side of the router serves only this machine. A web page can still reach 127.0.0.1 (a simple
+// text/plain POST needs no preflight, and DNS rebinding puts a foreign name on our address), so the Host header
+// must name a loopback address on the port actually bound, and a browser Origin, when present, must be loopback too.
+// Origin "null" (sandboxed frames, file pages) is foreign.
+const LOCAL_HOST_RE = /^(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})$/i
+const LOCAL_ORIGIN_RE = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?$/i
+function isLocalRequest(headers, port) {
+  const m = LOCAL_HOST_RE.exec(String((headers && headers.host) || ''))
+  if (!m || Number(m[2]) !== port) return false
+  const origin = headers.origin
+  return origin === undefined || LOCAL_ORIGIN_RE.test(String(origin))
 }
 
 // Inside the opened-up tunnel only model calls are for the router. Token refresh, profile lookups, Remote Control
@@ -546,4 +561,5 @@ module.exports = {
   parseConnectTarget,
   proxyAction,
   isRoutedRequest,
+  isLocalRequest,
 }

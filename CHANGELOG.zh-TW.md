@@ -6,6 +6,11 @@
 
 ## [未發布]
 
+### 安全性
+
+- **網頁不能再使用轉發站：** 轉發站以前會回應任何連到 `127.0.0.1` 的請求，瀏覽器裡開著的網頁可以送一個單純的 `text/plain` POST 到 `/v1/messages`，花掉你的供應商額度，或利用 DNS rebinding 讀取回應、呼叫 `/__session`、`/__probe` 與 `/__ping`。現在一般 HTTP 請求的 `Host` 必須是 `127.0.0.1`、`localhost` 或 `[::1]` 加上轉發站正在監聽的連接埠；瀏覽器送出的 `Origin` 也必須是這三個位址之一（`Origin: null` 一律拒絕），其他請求一律回 403。`api.anthropic.com` 代理通道裡的請求不受影響。
+- **不再接受 `constructor` 這類供應商名稱：** 每個 JavaScript 物件都有的名稱（`constructor`、`toString`、`__proto__`）以前會被當成已設定的供應商，`/__session` 可以把對話固定到這些名稱上，該對話的下一個請求就會讓轉發站當掉。現在它們一律視為不存在的供應商。
+
 ## [0.6.0] - 2026-10-20
 
 支援保留轉發站的手機 Remote Control（`proxy.enabled` 搭配只限 `api.anthropic.com` 的本機 CA）、一行指令設定 `haiku`／`sonnet`／`opus` 模型別名分流（`setup.mjs alias` 與 `/provider alias`），並動態註冊可直接派工的供應商子代理（`subagent_type: "model-relay:<name>"`），免建 `.claude/agents/*.md` 也免重開對話。`/provider` 互動面板同步新增 429 備援（`failover.chain`）、失敗重試（`retry.enabled`）與手機遙控三列開關（熱鍵 `f`／`t`／`x`）。

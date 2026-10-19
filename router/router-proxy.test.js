@@ -245,3 +245,52 @@ test('with proxy mode off the router refuses CONNECT and does not act as an open
   assert.strictEqual(h.proxy.enabled, false)
   assert.strictEqual(h.proxy.mitm + h.proxy.tunnel, 0)
 })
+
+// ---------- the plain-HTTP side serves only this machine ----------
+
+function call(port, { method = 'GET', p, headers = {}, body = '' }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path: p, headers: { ...headers, 'content-length': Buffer.byteLength(body) } }, (res) => {
+      const ch = []
+      res.on('data', (c) => ch.push(c))
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(ch).toString('utf8') }))
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+test('a foreign Host or a foreign browser Origin is refused before any routing or control', async (t) => {
+  const env = await setup(t, { proxy: false })
+  // DNS rebinding: a page on evil.test resolved to 127.0.0.1 sends its own name as Host
+  const rebound = await call(env.port, { method: 'POST', p: '/v1/messages', headers: { host: `evil.test:${env.port}`, 'content-type': 'text/plain' }, body: JSON.stringify({ model: 'glm-5.3', messages: [] }) })
+  assert.strictEqual(rebound.status, 403, rebound.body)
+  assert.strictEqual((await call(env.port, { p: '/__health', headers: { host: 'evil.test' } })).status, 403)
+  // A simple cross-site POST from a page: right Host, foreign Origin
+  const probe = await call(env.port, { method: 'POST', p: '/__probe', headers: { origin: 'https://evil.test' } })
+  assert.strictEqual(probe.status, 403, probe.body)
+  const spend = await call(env.port, { method: 'POST', p: '/v1/messages', headers: { origin: 'null', 'content-type': 'text/plain' }, body: JSON.stringify({ model: 'glm-5.3', messages: [] }) })
+  assert.strictEqual(spend.status, 403, spend.body)
+  assert.strictEqual(env.seen.provider.length + env.seen.anthropic.length, 0, 'nothing was spent upstream')
+  assert.strictEqual((await call(env.port, { p: '/__health' })).status, 200, 'a plain local call still works')
+  assert.strictEqual((await call(env.port, { p: '/__health', headers: { host: `localhost:${env.port}`, origin: `http://localhost:${env.port}` } })).status, 200)
+})
+
+test('/__session refuses an Object.prototype name as a provider', async (t) => {
+  const env = await setup(t, { proxy: false })
+  for (const on of ['constructor', 'toString', '__proto__']) {
+    const r = await call(env.port, { method: 'POST', p: '/__session', body: JSON.stringify({ sid: 's', on }) })
+    assert.strictEqual(r.status, 400, `${on}: ${r.body}`)
+  }
+})
+
+test('the Host check follows the port the router holds, not a port edited into the file later', async (t) => {
+  const env = await setup(t, { proxy: false })
+  const file = path.join(env.dir, 'model-relay.json')
+  const other = await freePort()
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), port: other }))
+  const h = await call(env.port, { p: '/__health' })
+  assert.strictEqual(h.status, 200, h.body)
+  const stale = await call(env.port, { p: '/__health', headers: { host: `127.0.0.1:${other}` } })
+  assert.strictEqual(stale.status, 403, 'a Host naming the edited port is not this router')
+})

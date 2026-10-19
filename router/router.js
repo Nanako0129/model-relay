@@ -367,6 +367,8 @@ function dispatch(req, res, tunneled) {
     const cfg = readCfg()
     if (!cfg) return apiError(res, 500, 'model-relay.json / custom-agent.json is missing or invalid')
     if (!L.isRoutedRequest(req.method, req.url)) return passthrough(cfg, req, res)
+  } else if (!L.isLocalRequest(req.headers, boundPort)) {
+    return apiError(res, 403, 'requests must come from this machine (Host 127.0.0.1, localhost or [::1] on the router port)')
   }
   const chunks = []
   req.on('data', (c) => chunks.push(c))
@@ -501,8 +503,12 @@ server.on('error', (e) => {
   log(`server error: ${e.message}`)
   process.exit(1)
 })
+// The Host check compares against the port this process really holds: the config file's port can be edited while
+// the router runs, and re-reading it per request would turn away every caller of the still-running router.
+let boundPort = 0
 server.listen(cfg0 ? cfg0.port : 8950, '127.0.0.1', () => {
-  log(`router up on ${cfg0 ? cfg0.port : 8950}, pid ${process.pid}`)
+  boundPort = server.address().port
+  log(`router up on ${boundPort}, pid ${process.pid}`)
   superviseLaunchers()
   setInterval(superviseLaunchers, 30000).unref()
 })
