@@ -6,6 +6,11 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A token variable the router cannot see is now visible:** the router resolves `env:VAR` tokens from the environment it was started with, so a key exported later was ignored until a restart while `doctor` (run from your shell) said "Config OK". `/__health` now lists `unresolved` providers with their variable name (never the value), the "config missing" error names the skipped providers and says to restart the router, and `doctor` warns when the running router lacks a variable your shell has.
+- **First `proxy enable --go` no longer fails its self-test with "unable to get local issuer certificate":** the router remembered "no certificate" for 10 seconds, and the plugin's health poll could record that just before `proxy enable` created the certificate, so the self-test connection was tunnelled to Anthropic instead of answered with the relay certificate. A missing certificate is no longer cached.
+
 ## [0.6.0] - 2026-10-20
 
 Use Remote Control without losing the relay (`proxy.enabled` with a local CA constrained to `api.anthropic.com`), point `haiku` / `sonnet` / `opus` aliases at any provider in one command (`setup.mjs alias` & `/provider alias`), and spawn provider subagents on the fly (`subagent_type: "model-relay:<name>"`) without `.claude/agents/*.md` files or restarting your session. The `/provider` panel also adds live toggles for 429 failover (`failover.chain`), retries (`retry.enabled`), and Remote Control (`f` / `t` / `x`).

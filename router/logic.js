@@ -15,6 +15,24 @@ function resolveToken(rawToken, env = process.env) {
   return s
 }
 
+// Providers whose `env:VAR` token has no value in `env`, as [{ provider, env }]; never the value itself
+function unresolvedEnv(raw, env = process.env) {
+  const migrated = migrateConfig(raw).config
+  const out = []
+  for (const [k, v] of Object.entries(migrated?.providers || {})) {
+    const t = v && typeof v.token === 'string' && v.token.startsWith('env:') ? v.token.slice(4).trim() : ''
+    if (t && !str(env[t])) out.push({ provider: k.trim().toLowerCase(), env: t })
+  }
+  return out
+}
+
+// The error for "parseCfg gave nothing": names the skipped providers when unset env vars are the reason
+function cfgMissingMessage(unresolved) {
+  if (!unresolved.length) return 'model-relay.json / custom-agent.json is missing or invalid'
+  const list = unresolved.map((u) => `${u.provider} (${u.env} is unset in the router process)`).join(', ')
+  return `model-relay: no provider is usable; skipped ${list}. Export the variable(s), then restart the router (it keeps the environment it was started with)`
+}
+
 function defaultPrefixRegex(name, model) {
   const clean = wireModel(model)
   const prefix = clean.split(/[-_.:/]/)[0] || name
@@ -523,6 +541,8 @@ module.exports = {
   retryWaitMs,
   parseProvider,
   parseCfg,
+  unresolvedEnv,
+  cfgMissingMessage,
   nextFallback,
   migrateConfig,
   matchProviderByModel,

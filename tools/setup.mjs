@@ -861,6 +861,11 @@ if (cmd === 'rc') {
           const foState = h.failoverSince ? `active since ${new Date(h.failoverSince).toISOString().slice(11, 19)}Z` : 'idle'
           const pxState = h.proxy ? `proxy ${h.proxy.enabled ? 'on' : 'off'} (${h.proxy.mitm} routed / ${h.proxy.tunnel} tunnelled)` : 'no proxy'
           console.log(`  Router health: ✓ up on 127.0.0.1:${cfg.port} (pid ${h.pid}, pinned sessions: ${h.sessionsOnCustom ?? 0}, 429 failover: ${foState}, ${pxState})`)
+          // the router resolves env:VAR from the environment it was started with, which may differ from this shell's
+          if (Array.isArray(h.unresolved) && h.unresolved.length) {
+            const list = h.unresolved.map((u) => `${u.provider} (${u.env})`).join(', ')
+            console.log(`  ⚠ The running router has no value for ${list}: it was started without that variable, so those providers are skipped there. Export it in the shell, stop the router (kill ${h.pid}) and start Claude Code from that shell so the new router inherits it`)
+          }
         } catch {
           console.log(`  Router health: ${rawHealth}`)
         }

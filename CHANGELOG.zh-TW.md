@@ -6,6 +6,11 @@
 
 ## [未發布]
 
+### 修正
+
+- **路由器看不到的 token 變數現在看得到了：** 路由器從「啟動當下」的環境解析 `env:VAR` token，所以之後才 export 的金鑰在重啟前都不會生效，而從你的 shell 執行的 `doctor` 卻顯示「Config OK」。現在 `/__health` 會以 `unresolved` 列出未解析的供應商與變數名稱（絕不顯示值）、「config missing」錯誤會指出被略過的供應商並說明需重啟路由器，`doctor` 也會在執行中的路由器缺少你 shell 裡已有的變數時提出警告。
+- **第一次 `proxy enable --go` 不再因「unable to get local issuer certificate」自我測試失敗：** 路由器會把「沒有憑證」記住 10 秒，而外掛的健康檢查輪詢可能恰好在 `proxy enable` 建立憑證之前記下這個結果，導致自我測試的連線被直接轉送到 Anthropic，而不是由轉發站的憑證回應。現在不再快取「憑證不存在」。
+
 ## [0.6.0] - 2026-10-20
 
 支援保留轉發站的手機 Remote Control（`proxy.enabled` 搭配只限 `api.anthropic.com` 的本機 CA）、一行指令設定 `haiku`／`sonnet`／`opus` 模型別名分流（`setup.mjs alias` 與 `/provider alias`），並動態註冊可直接派工的供應商子代理（`subagent_type: "model-relay:<name>"`），免建 `.claude/agents/*.md` 也免重開對話。`/provider` 互動面板同步新增 429 備援（`failover.chain`）、失敗重試（`retry.enabled`）與手機遙控三列開關（熱鍵 `f`／`t`／`x`）。

@@ -214,3 +214,13 @@ test('inside the opened tunnel only model calls are routed', () => {
     assert.strictEqual(L.isRoutedRequest(m, u), false, `${m} ${u}`)
   }
 })
+
+test('unset env:VAR tokens are reported by name, and explained when no provider is usable', () => {
+  const raw = { providers: { Gemini: { token: 'env:K1', baseUrl: 'http://127.0.0.1:1', model: 'gemini-4' }, glm: { token: 'lit', baseUrl: 'http://127.0.0.1:1', model: 'glm-5.3' } } }
+  assert.deepStrictEqual(L.unresolvedEnv(raw, {}), [{ provider: 'gemini', env: 'K1' }])
+  assert.deepStrictEqual(L.unresolvedEnv(raw, { K1: 'v' }), [])
+  const msg = L.cfgMissingMessage(L.unresolvedEnv({ providers: { gemini: raw.providers.Gemini } }, {}))
+  assert.match(msg, /gemini \(K1 is unset in the router process\)/)
+  assert.match(msg, /restart the router/)
+  assert.ok(!msg.includes('config missing'))
+})
