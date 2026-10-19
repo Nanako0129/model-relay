@@ -16,6 +16,14 @@ const PKI = require('./pki')
 for (const k of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) delete process.env[k]
 
 const dir = process.argv[2] || process.env.CLAUDE_CONFIG_DIR || path.join(process.env.USERPROFILE || process.env.HOME || '', '.claude')
+// Reported by /__health so a second router, or setup.mjs, can tell whose router answers on a port
+const realDir = (() => {
+  try {
+    return fs.realpathSync(dir)
+  } catch {
+    return path.resolve(dir)
+  }
+})()
 
 function resolveCfgPath() {
   const relay = path.join(dir, 'model-relay.json')
@@ -58,7 +66,15 @@ let state = (() => {
 // In-memory runtime latency/status per provider
 const providerStats = {}
 
+// Logs are capped at 5 MB: past that the file is emptied and starts over
+const capLog = (file) => {
+  try {
+    if (fs.statSync(file).size > 5 * 1024 * 1024) fs.writeFileSync(file, '')
+  } catch {}
+}
+
 const log = (line) => {
+  capLog(LOG_FILE)
   try {
     fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}\n`)
   } catch {}
@@ -87,9 +103,7 @@ const stick = (sid, providerName, why) => {
 }
 
 const logReq = (entry) => {
-  try {
-    if (fs.statSync(REQLOG).size > 5 * 1024 * 1024) fs.writeFileSync(REQLOG, '')
-  } catch {}
+  capLog(REQLOG)
   try {
     fs.appendFileSync(REQLOG, JSON.stringify({ t: Date.now(), ...entry }) + '\n')
   } catch {}
@@ -296,6 +310,7 @@ function control(req, res, body) {
     return json(res, {
       ok: true,
       pid: process.pid,
+      configDir: realDir,
       failoverSince: state.failoverSince,
       nextClaudeTry: state.nextClaudeTry,
       failoverProvider: cfg ? cfg.failoverProvider : 'glm',
@@ -496,13 +511,35 @@ server.on('connect', (req, client, head) => {
 })
 
 const cfg0 = readCfg()
+const PORT = cfg0 ? cfg0.port : 8950
 server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') process.exit(0)
+  if (e.code === 'EADDRINUSE') {
+    // The plugin starts the router on every session, so our own router already running is the normal case; anyone else is not
+    const refuse = (other) => {
+      if (other === realDir) process.exit(0)
+      log(`port ${PORT} is already used by ${other ? `another model-relay router (config dir ${other})` : 'an unknown process'}; this router (config dir ${realDir}) did not start. Change the port with "node tools/setup.mjs set port <n>"`)
+      process.exit(1)
+    }
+    const req = http.get(`http://127.0.0.1:${PORT}/__health`, { timeout: 2000 }, (res) => {
+      const ch = []
+      res.on('data', (c) => ch.push(c))
+      res.on('end', () => {
+        try {
+          refuse(JSON.parse(Buffer.concat(ch).toString('utf8')).configDir || null)
+        } catch {
+          refuse(null)
+        }
+      })
+    })
+    req.on('error', () => refuse(null))
+    req.on('timeout', () => refuse(null))
+    return
+  }
   log(`server error: ${e.message}`)
   process.exit(1)
 })
-server.listen(cfg0 ? cfg0.port : 8950, '127.0.0.1', () => {
-  log(`router up on ${cfg0 ? cfg0.port : 8950}, pid ${process.pid}`)
+server.listen(PORT, '127.0.0.1', () => {
+  log(`router up on ${PORT}, pid ${process.pid}`)
   superviseLaunchers()
   setInterval(superviseLaunchers, 30000).unref()
 })

@@ -6,6 +6,22 @@
 
 ## [未發布]
 
+### 新增
+
+- **`setup.mjs set port <n>`：** 修改轉發站連接埠（`1025`–`65535`），保留 `.relay-backup` 備份，並同步改寫 `settings.json`（`ANTHROPIC_BASE_URL`，代理模式則是 `HTTPS_PROXY`，照例備份）。執行中的轉發站要重新啟動才會換埠。
+- **`/__health` 回報 `configDir`：** 轉發站是為哪個設定目錄啟動的，讓 `doctor` 與 `proxy` 能分辨連接埠上回應的是誰的轉發站。
+
+### 變更
+
+- **轉發站拿不到連接埠時會說明原因：** 遇到 `EADDRINUSE`，只有佔用者回報相同設定目錄時才靜默結束；否則把連接埠與另一個設定目錄（或未知程序）寫進 `custom-agent-router.log`，並以非零狀態結束。
+- **`doctor`、`proxy status` 與 `proxy enable|renew` 會察覺別人的轉發站：** 連接埠上的轉發站屬於其他設定目錄，或是不回報目錄的舊版時，`doctor` 與 `proxy status` 會警告、`proxy enable|renew` 會拒絕並指出兩個目錄，且在變更任何東西之前。
+- **README：** 說明 `tools/setup.mjs` 的位置與執行方式、`env:VAR` token 讀的是轉發站自己的環境、範例設定會把所有 `haiku` 呼叫送到 GLM、自動直連退路只在 `ANTHROPIC_BASE_URL` 模式有效、`HTTPS_PROXY` 也會套用到 `git`／`curl`／`gh`、`proxy.enabled` 實際開放了什麼、CI 實際測了什麼，以及完整的移除清單。
+
+### 修正
+
+- **`init --fix` 寫死連接埠 8950：** 改為寫入設定檔中的連接埠。
+- **`custom-agent-router.log` 無限成長：** 現在和 `custom-agent-requests.log` 一樣超過 5 MB 就清空，與文件一致。
+
 ## [0.6.0] - 2026-10-20
 
 支援保留轉發站的手機 Remote Control（`proxy.enabled` 搭配只限 `api.anthropic.com` 的本機 CA）、一行指令設定 `haiku`／`sonnet`／`opus` 模型別名分流（`setup.mjs alias` 與 `/provider alias`），並動態註冊可直接派工的供應商子代理（`subagent_type: "model-relay:<name>"`），免建 `.claude/agents/*.md` 也免重開對話。`/provider` 互動面板同步新增 429 備援（`failover.chain`）、失敗重試（`retry.enabled`）與手機遙控三列開關（熱鍵 `f`／`t`／`x`）。

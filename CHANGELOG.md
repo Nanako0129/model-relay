@@ -6,6 +6,22 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`setup.mjs set port <n>`:** Changes the router port (`1025`–`65535`), keeps a `.relay-backup` copy, and rewires `settings.json` (`ANTHROPIC_BASE_URL`, or `HTTPS_PROXY` in proxy mode) with the usual backup. The running router keeps its old port until it is restarted.
+- **`/__health` reports `configDir`:** The config directory the router was started for, so `doctor` and `proxy` can tell whose router answers on a port.
+
+### Changed
+
+- **A router that cannot take its port says why:** On `EADDRINUSE` it exits quietly only when the occupant reports the same config directory; otherwise it logs the port and the other config directory (or an unknown process) to `custom-agent-router.log` and exits non-zero.
+- **`doctor`, `proxy status` and `proxy enable|renew` notice a foreign router:** When the router on the port belongs to another config directory, or is an older one that does not report it, `doctor` and `proxy status` warn and `proxy enable|renew` refuse, naming both directories, before changing anything.
+- **README:** Says where `tools/setup.mjs` lives and how to run it, that `env:VAR` tokens come from the router's own environment, that the example config sends every `haiku` call to GLM, that the automatic direct fallback only works in `ANTHROPIC_BASE_URL` mode, that `HTTPS_PROXY` also applies to `git` / `curl` / `gh`, what `proxy.enabled` really opens up, what CI really tests, and the full uninstall list.
+
+### Fixed
+
+- **`init --fix` wired port 8950:** It now wires the port from the config file.
+- **`custom-agent-router.log` grew without limit:** It is now emptied past 5 MB like `custom-agent-requests.log`, as documented.
+
 ## [0.6.0] - 2026-10-20
 
 Use Remote Control without losing the relay (`proxy.enabled` with a local CA constrained to `api.anthropic.com`), point `haiku` / `sonnet` / `opus` aliases at any provider in one command (`setup.mjs alias` & `/provider alias`), and spawn provider subagents on the fly (`subagent_type: "model-relay:<name>"`) without `.claude/agents/*.md` files or restarting your session. The `/provider` panel also adds live toggles for 429 failover (`failover.chain`), retries (`retry.enabled`), and Remote Control (`f` / `t` / `x`).
