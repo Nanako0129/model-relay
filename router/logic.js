@@ -88,7 +88,7 @@ const PRESETS = {
   },
 }
 
-function parseProvider(name, raw, env = process.env) {
+function parseProvider(name, raw, env = process.env, baseRetry = parseRetryCfg(undefined)) {
   if (typeof raw !== 'object' || raw === null) return null
   const presetKey = (str(raw.preset) || name || '').toLowerCase()
   const preset = PRESETS[presetKey] || null
@@ -135,28 +135,49 @@ function parseProvider(name, raw, env = process.env) {
     stripToolSearch,
     stripCacheControl,
     authHeader,
+    matchSources: rawMatchers,
     matchRegexes,
     launch,
+    // null: never retried; otherwise the effective retry settings (per-provider overrides merged over the global ones)
+    retryCfg: baseRetry.enabled ? resolveProviderRetry(raw.retry, baseRetry) : null,
+    // Who takes over when this provider cannot answer: undefined = the failover chain, null = nobody, or its own list
+    fallback: raw.fallback === false ? null : Array.isArray(raw.fallback) ? dedupe(lowerNames(raw.fallback)) : undefined,
   }
 }
 
-function parseCfg(raw, env = process.env) {
-  if (typeof raw !== 'object' || raw === null) return null
-  const providers = {}
-
-  // 1. Modern format: { providers: { glm: {...}, gemini: {...}, ... } }
-  if (typeof raw.providers === 'object' && raw.providers !== null) {
-    for (const [k, v] of Object.entries(raw.providers)) {
-      const key = k.trim().toLowerCase()
-      if (!key || key === 'claude') continue
-      const p = parseProvider(key, v, env)
-      if (p) providers[key] = p
-    }
+// raw.retry: false (off) | undefined (use global) | { attempts, delayMs, backoff, maxDelayMs, failover } (partial override)
+function resolveProviderRetry(raw, base) {
+  if (raw === false) return null
+  if (typeof raw !== 'object' || raw === null) return base
+  if (raw.enabled === false) return null
+  const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d)
+  return {
+    attempts: Math.min(30, Math.floor(num(raw.attempts, base.attempts))),
+    delayMs: Math.min(300000, num(raw.delayMs, base.delayMs)),
+    backoff: Math.min(4, Math.max(1, num(raw.backoff, base.backoff))),
+    maxDelayMs: Math.min(300000, num(raw.maxDelayMs, base.maxDelayMs)),
+    failover: typeof raw.failover === 'boolean' ? raw.failover : base.failover,
+    enabled: true,
   }
+}
 
-  // 2. Legacy format compatibility: top-level { baseUrl, token, model, gemini: {...} }
-  if (!providers.glm && str(raw.baseUrl) && str(raw.token) && str(raw.model)) {
-    const glm = parseProvider('glm', {
+const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
+const lowerNames = (list) => (Array.isArray(list) ? list : []).map((n) => String(n).trim().toLowerCase()).filter((n) => n && n !== 'claude')
+const dedupe = (list) => [...new Set(list)]
+const DEFAULT_COOLDOWN_MS = 600000
+
+// The one place that knows about older config layouts: the original single-GLM keys at the top level, the separate
+// `gemini` block, failoverEnabled / probeEveryMin / failoverProvider. Everything else reads the current shape only.
+// Returns the current-shape object (secrets copied through untouched) and one note per thing it moved.
+function migrateConfig(raw) {
+  const notes = []
+  if (!isObj(raw)) return { config: null, notes }
+  const config = { ...raw }
+  const providers = isObj(raw.providers) ? { ...raw.providers } : {}
+  const has = (name) => Object.keys(providers).some((k) => k.trim().toLowerCase() === name)
+
+  if (!has('glm') && str(raw.baseUrl) && str(raw.token) && str(raw.model)) {
+    providers.glm = {
       baseUrl: raw.baseUrl,
       token: raw.token,
       model: raw.model,
@@ -164,47 +185,117 @@ function parseCfg(raw, env = process.env) {
       stripToolSearch: true,
       stripCacheControl: false,
       authHeader: 'bearer',
-      launch: raw.launch,
-    }, env)
-    if (glm) providers.glm = glm
+      ...(raw.launch ? { launch: raw.launch } : {}),
+    }
+    notes.push('top-level baseUrl/token/model -> providers.glm')
   }
-  if (!providers.gemini && typeof raw.gemini === 'object' && raw.gemini !== null) {
-    const gem = parseProvider('gemini', {
-      ...raw.gemini,
-      matchModels: raw.gemini.matchModels || ['^gemini'],
-      stripCacheControl: raw.gemini.stripCacheControl !== undefined ? raw.gemini.stripCacheControl : true,
-      authHeader: raw.gemini.authHeader || 'both',
-    }, env)
-    if (gem) providers.gemini = gem
+  for (const k of ['baseUrl', 'token', 'model', 'launch']) {
+    if (k in config && (has('glm') || !str(raw.baseUrl))) {
+      delete config[k]
+      if (k !== 'launch' || raw.launch) notes.push(`removed top-level ${k} (providers.glm replaces it)`)
+    }
   }
 
+  if (isObj(raw.gemini)) {
+    if (!has('gemini')) {
+      providers.gemini = {
+        ...raw.gemini,
+        matchModels: raw.gemini.matchModels || ['^gemini'],
+        stripCacheControl: raw.gemini.stripCacheControl !== undefined ? raw.gemini.stripCacheControl : true,
+        authHeader: raw.gemini.authHeader || 'both',
+      }
+      notes.push('top-level gemini -> providers.gemini')
+    } else {
+      notes.push('removed top-level gemini (providers.gemini replaces it)')
+    }
+    delete config.gemini
+  }
+
+  const fo = isObj(raw.failover) ? raw.failover : {}
+  const legacyMin = typeof fo.probeEveryMin === 'number' ? fo.probeEveryMin : raw.probeEveryMin
+  const cooldownMs = typeof fo.cooldownMs === 'number' && fo.cooldownMs >= 0
+    ? fo.cooldownMs
+    : (typeof legacyMin === 'number' && Number.isFinite(legacyMin) ? legacyMin * 60000 : DEFAULT_COOLDOWN_MS)
+  const chain = Array.isArray(fo.chain) ? fo.chain : [fo.provider || raw.failoverProvider].filter(Boolean)
+  const nextFo = {
+    enabled: fo.enabled !== undefined ? fo.enabled !== false : raw.failoverEnabled !== false,
+    chain: lowerNames(chain),
+    cooldownMs,
+  }
+  const sameFo = isObj(raw.failover) && raw.failover.enabled === nextFo.enabled && raw.failover.cooldownMs === nextFo.cooldownMs
+    && Array.isArray(raw.failover.chain) && raw.failover.chain.join() === nextFo.chain.join() && !('provider' in raw.failover) && !('probeEveryMin' in raw.failover)
+  if (!sameFo) notes.push('failover -> { enabled, chain, cooldownMs }')
+  for (const k of ['failoverEnabled', 'probeEveryMin', 'failoverProvider']) {
+    if (k in raw) notes.push(`removed top-level ${k} (failover.* replaces it)`)
+    delete config[k]
+  }
+  config.failover = nextFo
+  config.providers = providers
+  return { config, notes }
+}
+
+function parseCfg(raw, env = process.env) {
+  const migrated = migrateConfig(raw).config
+  if (!migrated) return null
+  const retry = parseRetryCfg(migrated.retry)
+  const providers = {}
+  for (const [k, v] of Object.entries(migrated.providers)) {
+    const key = k.trim().toLowerCase()
+    if (!key || key === 'claude') continue
+    const p = parseProvider(key, v, env, retry)
+    if (p) providers[key] = p
+  }
   const names = Object.keys(providers)
   if (names.length === 0) return null
 
-  const fo = typeof raw.failover === 'object' && raw.failover !== null ? raw.failover : {}
-  const failoverEnabled = fo.enabled !== undefined ? fo.enabled !== false : raw.failoverEnabled !== false
-  const preferredFo = str(fo.provider || raw.failoverProvider)?.toLowerCase()
-  const failoverProvider = (preferredFo && providers[preferredFo]) ? preferredFo : (providers.glm ? 'glm' : names[0])
+  // The chain is the order providers are used when Claude is out of quota; names that are not configured are skipped
+  let failoverChain = dedupe(migrated.failover.chain.filter((n) => providers[n]))
+  if (failoverChain.length === 0) failoverChain = [providers.glm ? 'glm' : names[0]]
+  const port = Number.isInteger(migrated.port) && migrated.port > 1024 && migrated.port < 65536 ? migrated.port : 8950
 
-  const rawMin = typeof fo.probeEveryMin === 'number' ? fo.probeEveryMin : raw.probeEveryMin
-  const min = typeof rawMin === 'number' && Number.isFinite(rawMin) ? rawMin : 10
-  const port = Number.isInteger(raw.port) && raw.port > 1024 && raw.port < 65536 ? raw.port : 8950
-
-  const primary = providers[failoverProvider]
   return {
     providers,
-    failoverProvider,
-    // Keep legacy fields for existing callers/tests
-    zaiUrl: primary.url,
-    token: primary.token,
-    model: primary.model,
-    gemini: providers.gemini || null,
+    failoverChain,
+    failoverProvider: failoverChain[0], // the first link; kept as its own field for callers that show a single target
     port,
-    claudeUrl: str(raw.claudeUrl) || 'https://api.anthropic.com',
-    failoverEnabled,
-    probeEveryMs: Math.min(120, Math.max(1, min)) * 60000,
-    retry: parseRetryCfg(raw.retry),
+    claudeUrl: str(migrated.claudeUrl) || 'https://api.anthropic.com',
+    failoverEnabled: migrated.failover.enabled,
+    cooldownMs: Math.min(7200000, Math.max(60000, migrated.failover.cooldownMs)),
+    retry,
+    proxy: parseProxyCfg(migrated.proxy),
   }
+}
+
+// HTTPS proxy mode: Claude Code keeps talking to api.anthropic.com (Remote Control insists on it) and uses the
+// router as its HTTPS proxy. Only this host is opened up and routed; every other host is a plain byte tunnel.
+const PROXY_MITM_HOST = 'api.anthropic.com'
+
+// raw.proxy: { enabled: true } turns it on; anything else leaves it off, so the router is never an open CONNECT proxy by accident.
+// `setup.mjs proxy enable` writes the setting; `proxy disable` clears it.
+function parseProxyCfg(raw) {
+  return { enabled: typeof raw === 'object' && raw !== null && raw.enabled === true }
+}
+
+// "host:port" from a CONNECT request line; null when it is not a usable target
+function parseConnectTarget(authority) {
+  const m = /^(?:\[([0-9a-f:.]+)\]|([a-z0-9._-]+)):(\d{1,5})$/i.exec(String(authority || '').trim())
+  if (!m) return null
+  const port = Number(m[3])
+  if (port < 1 || port > 65535) return null
+  return { host: (m[1] || m[2]).toLowerCase(), port }
+}
+
+// What to do with a CONNECT: answer for it ('mitm'), pass the bytes through untouched ('tunnel'), or turn it away.
+// Without a usable certificate even api.anthropic.com is tunnelled, so Claude Code keeps working, just unrouted.
+function proxyAction(proxyCfg, target, haveCert) {
+  if (!proxyCfg || !proxyCfg.enabled || !target) return 'refuse'
+  return target.host === PROXY_MITM_HOST && target.port === 443 && haveCert ? 'mitm' : 'tunnel'
+}
+
+// Inside the opened-up tunnel only model calls are for the router. Token refresh, profile lookups, Remote Control
+// and anything else must reach Anthropic unchanged: running them through decide() could send them to a provider.
+function isRoutedRequest(method, url) {
+  return method === 'POST' && /^\/v1\/messages(?:\/|\?|$)/.test(String(url || ''))
 }
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529])
@@ -213,7 +304,8 @@ function parseRetryCfg(raw) {
   const r = typeof raw === 'object' && raw !== null ? raw : {}
   const num = (v, d) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : d)
   return {
-    attempts: Math.min(30, Math.floor(num(r.attempts, 3))),
+    enabled: r.enabled !== false, // the global switch: false means no provider is ever retried
+    attempts: Math.min(30, Math.floor(num(r.attempts, 3))), // 0 = unlimited: keep retrying until it answers
     delayMs: Math.min(60000, num(r.delayMs, 2000)),
     backoff: Math.min(4, Math.max(1, num(r.backoff, 2))),
     maxDelayMs: Math.min(300000, num(r.maxDelayMs, 10000)),
@@ -222,11 +314,11 @@ function parseRetryCfg(raw) {
 }
 
 // How long to wait before retrying the SAME provider, or null when retrying cannot help
-// (status not retryable, or attempts exhausted). Retry-After within budget is honoured;
-// a longer one keeps polling at maxDelayMs instead of giving up.
+// (status not retryable, or attempts exhausted — never when attempts is 0, the unlimited setting).
+// Retry-After within budget is honoured; a longer one keeps polling at maxDelayMs instead of giving up.
 function retryWaitMs(status, headers, attempt, cfg) {
   if (!RETRYABLE_STATUSES.has(status)) return null
-  if (attempt >= cfg.attempts) return null
+  if (cfg.attempts > 0 && attempt >= cfg.attempts) return null
   const ra = headers && headers['retry-after']
   const raText = Array.isArray(ra) ? ra[0] : ra
   const raSec = Number(raText)
@@ -236,8 +328,16 @@ function retryWaitMs(status, headers, attempt, cfg) {
   return Math.min(cfg.maxDelayMs, cfg.delayMs * Math.pow(cfg.backoff, attempt))
 }
 
-const isGeminiModel = (model) => typeof model === 'string' && /^gemini/i.test(model)
-const isGlmModel = (model) => typeof model === 'string' && /^glm/i.test(model)
+// The provider that takes over when `providerName` cannot answer: its own `fallback` list, else the failover chain,
+// skipping itself and every provider already tried for this request. null when nobody is left.
+function nextFallback(cfg, providerName, tried = []) {
+  if (!cfg || !cfg.providers) return null
+  const own = cfg.providers[providerName] && cfg.providers[providerName].fallback
+  if (own === null) return null
+  const skip = new Set([providerName, ...tried])
+  const next = (own || cfg.failoverChain || []).find((n) => !skip.has(n) && cfg.providers[n])
+  return next ? cfg.providers[next] : null
+}
 
 function matchProviderByModel(cfg, model) {
   if (typeof model !== 'string' || !model || !cfg || !cfg.providers) return null
@@ -249,6 +349,30 @@ function matchProviderByModel(cfg, model) {
   return null
 }
 
+// Claude's three model tiers and their full model IDs. When a provider's matchModels catches one of these (for
+// example "haiku" on glm), the router must also rewrite the body's `model` field to the provider's model ID so
+// providers that do not recognize "claude-haiku-*" still accept the request.
+const ALIAS_SLOTS = {
+  haiku: 'claude-haiku-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  opus: 'claude-opus-5-5',
+}
+
+function isClaudeModel(model) {
+  return typeof model === 'string' && /^(claude[-_]|claude$|haiku\b|sonnet\b|opus\b)/i.test(wireModel(model).trim())
+}
+
+// Which provider (if any) currently claims each Claude model tier (`haiku`, `sonnet`, `opus`) via matchModels.
+function detectAliases(cfg) {
+  const out = {}
+  if (!cfg || !cfg.providers) return out
+  for (const [slot, sample] of Object.entries(ALIAS_SLOTS)) {
+    const target = matchProviderByModel(cfg, sample)
+    if (target) out[slot] = target
+  }
+  return out
+}
+
 // Subscription usage limits come back as 429 with the unified rate-limit status
 // "rejected"; the message wording is the fallback signal.
 function isUsageLimit(status, headers, bodyText) {
@@ -257,20 +381,9 @@ function isUsageLimit(status, headers, bodyText) {
   return /usage limit|limit reached|hit your limit|limit (will )?resets?/i.test(bodyText || '')
 }
 
-// `sticky` maps sessionId -> { provider, at }. `onGlm` and `onGemini` are kept in sync for backward compatibility.
-function syncLegacyViews(sticky) {
-  const onGlm = {}
-  const onGemini = {}
-  for (const [sid, entry] of Object.entries(sticky)) {
-    if (!entry || typeof entry.at !== 'number') continue
-    if (entry.provider === 'glm') onGlm[sid] = entry.at
-    else if (entry.provider === 'gemini') onGemini[sid] = entry.at
-  }
-  return { onGlm, onGemini }
-}
-
+// `sticky` maps sessionId -> { provider, at }
 function emptyState() {
-  return { failoverSince: 0, nextClaudeTry: 0, sticky: {}, onGlm: {}, onGemini: {} }
+  return { failoverSince: 0, nextClaudeTry: 0, sticky: {} }
 }
 
 function parseState(raw) {
@@ -297,8 +410,7 @@ function parseState(raw) {
       }
     }
   }
-  const views = syncLegacyViews(sticky)
-  return { failoverSince: s.failoverSince, nextClaudeTry: s.nextClaudeTry, sticky, ...views }
+  return { failoverSince: s.failoverSince, nextClaudeTry: s.nextClaudeTry, sticky }
 }
 
 const STICKY_TTL_MS = 7 * 24 * 3600e3
@@ -309,10 +421,8 @@ function pruneSticky(state, now) {
   for (const [sid, entry] of Object.entries(base.sticky)) {
     if (now - entry.at < STICKY_TTL_MS) sticky[sid] = entry
   }
-  return { ...base, sticky, ...syncLegacyViews(sticky) }
+  return { ...base, sticky }
 }
-
-const pruneGlm = pruneSticky
 
 function setSticky(state, sid, provider, now) {
   if (!sid) return state
@@ -323,23 +433,7 @@ function setSticky(state, sid, provider, now) {
   } else {
     sticky[sid] = { provider: provider.toLowerCase(), at: now }
   }
-  return { ...base, sticky, ...syncLegacyViews(sticky) }
-}
-
-function setSession(state, sid, onGlm, now) {
-  if (!sid) return state
-  const base = parseState(state)
-  if (onGlm) return setSticky(base, sid, 'glm', now)
-  if (base.sticky[sid]?.provider === 'glm') return setSticky(base, sid, null, now)
-  return base
-}
-
-function setGemini(state, sid, on, now) {
-  if (!sid) return state
-  const base = parseState(state)
-  if (on) return setSticky(base, sid, 'gemini', now)
-  if (base.sticky[sid]?.provider === 'gemini') return setSticky(base, sid, null, now)
-  return base
+  return { ...base, sticky }
 }
 
 function getSessionProvider(state, cfg, sid) {
@@ -379,7 +473,7 @@ function decide(state, cfg, model, sid, now) {
 }
 
 function onLimited(state, cfg, now) {
-  return { ...state, failoverSince: state.failoverSince || now, nextClaudeTry: now + cfg.probeEveryMs }
+  return { ...state, failoverSince: state.failoverSince || now, nextClaudeTry: now + cfg.cooldownMs }
 }
 
 function onClaudeOk(state) {
@@ -402,20 +496,20 @@ function stripCache(v) {
 
 function rewriteBody(bodyBuf, opts = {}) {
   const model = opts.model || null
+  const defaultModel = opts.defaultModel || null
   const noCache = Boolean(opts.stripCacheControl)
   const dropToolSearch = opts.stripToolSearch !== false
   const j = JSON.parse(bodyBuf.toString('utf8'))
   if (noCache) stripCache(j)
   const tools = dropToolSearch && Array.isArray(j.tools) ? j.tools.filter((t) => !hiddenOnCustom(t)) : null
   const dropTools = tools !== null && tools.length !== j.tools.length
-  if (!model && !dropTools && !noCache) return bodyBuf
-  if (model) j.model = wireModel(model)
+  const targetModel = model || (defaultModel && isClaudeModel(j.model) ? defaultModel : null)
+  const strippedSame = !targetModel && typeof j.model === 'string' && wireModel(j.model) !== j.model ? wireModel(j.model) : null
+  if (!targetModel && !strippedSame && !dropTools && !noCache) return bodyBuf
+  if (targetModel) j.model = wireModel(targetModel)
+  else if (strippedSame) j.model = strippedSame
   if (dropTools) j.tools = tools
   return Buffer.from(JSON.stringify(j), 'utf8')
-}
-
-function forZai(bodyBuf, model, noCache) {
-  return rewriteBody(bodyBuf, { model, stripCacheControl: Boolean(noCache), stripToolSearch: true })
 }
 
 function upstreamPath(base, reqUrl) {
@@ -429,23 +523,27 @@ module.exports = {
   retryWaitMs,
   parseProvider,
   parseCfg,
-  isGlmModel,
-  isGeminiModel,
+  nextFallback,
+  migrateConfig,
   matchProviderByModel,
+  ALIAS_SLOTS,
+  isClaudeModel,
+  detectAliases,
   setSticky,
   getSessionProvider,
-  setGemini,
   isUsageLimit,
   emptyState,
   parseState,
   pruneSticky,
-  pruneGlm,
   decide,
   parseRoute,
-  setSession,
   onLimited,
   onClaudeOk,
   rewriteBody,
-  forZai,
   upstreamPath,
+  PROXY_MITM_HOST,
+  parseProxyCfg,
+  parseConnectTarget,
+  proxyAction,
+  isRoutedRequest,
 }

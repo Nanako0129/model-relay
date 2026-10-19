@@ -59,7 +59,7 @@ Expected output:
 Config OK (~/.claude/model-relay.json)
   Port: 8950
   Providers: glm -> glm-5.3[1m], gemini -> gemini-4-argon
-  Failover: glm (cooldown 600s)
+  Failover: glm (back to Claude after 10 min)    Retry: on
   Claude settings: ✓ settings.json ANTHROPIC_BASE_URL=http://127.0.0.1:8950
   Router health: {"ok":true,"pid":38780,"failoverSince":0,"nextClaudeTry":0,"failoverProvider":"glm"}
   Upstream ping:
@@ -81,19 +81,67 @@ Update with `claude plugin update model-relay@model-relay`.
 
 ### Interactive `AbovePrompt` control panel and live latency ping
 
-Type `/provider` (or `/provider panel`) to open an interactive control panel right above your prompt input box. Click buttons or press `ctrl+x tab` to use keyboard hotkeys (`1`–`9` to switch routes, `p` to ping live latency across all providers, `r` to reset 429 cooldown). Switching a pinned session back to Claude requires a two-click confirmation so you never accidentally rebuild a massive prompt cache.
+Type `/provider` (or `/provider panel`) to open an interactive control panel right above your prompt input box. Click buttons or press `ctrl+x tab` to use keyboard hotkeys (`1`–`9` to switch routes, `p` to ping live latency across all providers, `r` to reset 429 cooldown, `f` / `t` / `x` to flip 429 failover, retry and Remote Control). Switching a pinned session back to Claude requires a two-click confirmation so you never accidentally rebuild a massive prompt cache. Three switch rows turn 429 failover, retry and Remote Control on or off without editing JSON: failover and retry apply from the next request, while Remote Control asks first because it rewrites `settings.json`, and it only reaches new sessions.
 
 ### Cache-safe sticky 429 failover
 
-When Anthropic returns a 429 usage-limit response, the router immediately forwards the request to your configured `failover.provider` and pins that session ID for 7 days. After `cooldownMs` (default 10 minutes), new sessions probe Claude again while existing sticky sessions stay on their backup provider.
+When Anthropic returns a 429 usage-limit response, the router immediately forwards the request to the first provider in `failover.chain` and pins that session ID for 7 days. After `failover.cooldownMs` (default 10 minutes), new sessions probe Claude again while existing sticky sessions stay on their backup provider. `failover.enabled` switches the whole thing off.
 
 ### Transparent provider retries
 
-A provider answering 429 or 5xx is retried on the SAME provider with exponential backoff (`retry.attempts`/`delayMs`/`backoff`), capped by `retry.maxDelayMs`; a longer `Retry-After` keeps polling at that cap. Claude Code never sees the intermediate failures. Turn on `retry.failover` if you would rather have the request handed to `failover.provider` once retries run out.
+A provider answering 429 or 5xx is retried on the SAME provider with exponential backoff (`retry.attempts`/`delayMs`/`backoff`), capped by `retry.maxDelayMs`; a longer `Retry-After` keeps polling at that cap. Set `retry.attempts: 0` to retry forever (keep hammering until it succeeds — the client connection is watched, so retries stop once the caller disconnects). Claude Code never sees the intermediate failures. `retry.enabled` turns retrying off everywhere in one go. Turn on `retry.failover` and a request that still fails once its retries run out is handed to the next provider in `failover.chain` (or to that provider's own `fallback` list), never back to one it already tried.
 
 ### Built-in provider presets and local gateway auto-launch
 
 Use built-in presets (`zai`, `glm`, `deepseek`, `kimi`, `minimax`, `openrouter`, `gemini`, `magpie`) so you only need to supply `token` (or `"env:VAR_NAME"`). For local gateways on `127.0.0.1`, set `launch: { command, args }` and the router will automatically spawn the gateway process whenever its port is closed.
+
+### Model alias routing (pointing `haiku` / `sonnet` / `opus` at a provider)
+
+`model-relay` separates three routing layers so they never get mixed up:
+
+1. **Per-request model alias (`matchModels` + `ANTHROPIC_DEFAULT_*_MODEL`):** Routes only requests whose `model` matches (such as `haiku` subagents or `WebFetch` summaries) without pinning the main conversation.
+2. **Per-conversation pin (`/provider <name>`):** Pins only the current conversation ID (`x-claude-code-session-id`) for 7 days; other windows stay on Claude.
+3. **429 failover chain (`failover.chain`):** Takes over only when Anthropic returns a 429 usage-limit error.
+
+Pointing a Claude tier like `haiku` at a provider (for example `glm`) coordinates two places at once:
+
+- `~/.claude/settings.json` → `env.ANTHROPIC_DEFAULT_HAIKU_MODEL = "glm-5.3[1m]"` so Claude Code itself resolves the `haiku` alias to `glm-5.3[1m]` (including the `[1m]` context window) and sends `"model": "glm-5.3"`.
+- `~/.claude/model-relay.json` → `providers.glm.matchModels: ["^glm", "haiku"]` so the router catches both `"glm-5.3"` (via `^glm`) and any internal Claude Code calls that hardcode `"claude-haiku-*"` (via `"haiku"`), rewriting the wire `model` field to `"glm-5.3"`.
+
+Use `setup.mjs alias` (or `/provider alias`) to inspect or set both files in one step:
+
+```bash
+node tools/setup.mjs alias                       # inspect haiku / sonnet / opus / subagent default
+node tools/setup.mjs alias haiku glm             # point haiku at glm in both settings.json and model-relay.json
+node tools/setup.mjs alias haiku claude          # reset haiku back to Anthropic Claude
+node tools/setup.mjs alias subagent sonnet       # set CLAUDE_CODE_SUBAGENT_MODEL=sonnet in settings.json
+```
+
+For per-call subagent routing, `model-relay` also dynamically registers a full-capability `Agent` type `model-relay:<name>` (such as `model-relay:glm` and `model-relay:gemini`) via `$.agent.register` with all parent tools and `model` set to that provider's model ID, and locks that model in `on('agent.spawn')`—so you can spawn `subagent_type: "model-relay:gemini"` on the fly without creating `.claude/agents/*.md` files or restarting the session.
+
+### Edit the config from the command line
+
+`set`, `providers`, `remove` and `migrate` change the file without hand-editing JSON. Every edit keeps a `.relay-backup` copy next to the file, tokens are never printed, and the running router picks the change up on its next request. `doctor` also warns about an old layout, a failover name that matches no provider, and a model name another provider claims first.
+
+```bash
+node tools/setup.mjs providers
+node tools/setup.mjs set failover.chain gemini,glm
+node tools/setup.mjs set providers.gemini.fallback none
+node tools/setup.mjs migrate --go
+```
+
+### Remote Control without giving up the relay
+
+Remote Control only starts when Claude Code talks to `api.anthropic.com`, which a base URL pointing at the relay breaks. HTTPS proxy mode keeps that address and makes the relay the proxy instead: Claude Code connects through `HTTPS_PROXY`, the relay answers for `api.anthropic.com` with a certificate that Claude Code trusts through `NODE_EXTRA_CA_CERTS`, and model calls are routed exactly as before (providers, sticky failover, retries). Everything else, token refresh and Remote Control traffic included, passes to Anthropic unchanged.
+
+```bash
+node tools/setup.mjs proxy enable --go
+node tools/setup.mjs rc
+```
+
+- **Contained trust:** The CA the relay creates can only vouch for `api.anthropic.com` (a critical name constraint), its private key is discarded right after signing, and only Claude Code processes that carry `NODE_EXTRA_CA_CERTS` load it. The system certificate store is never touched.
+- **Safe fallback:** Without a usable certificate the relay tunnels `api.anthropic.com` untouched, so Claude Code keeps working, just unrouted.
+- **Reversible:** `proxy disable --go` restores `ANTHROPIC_BASE_URL`, and the previous `settings.json` is kept as `settings.json.relay-backup`.
 
 ## Configuration
 
@@ -103,14 +151,18 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 |---|---|---|
 | `port` | `8950` | Localhost port for the relay HTTP server (`1025`–`65535`) |
 | `claudeUrl` | `"https://api.anthropic.com"` | Upstream Anthropic API base URL |
-| `failover.enabled` | `true` | Automatically switch to `failover.provider` on Claude 429 usage limits |
-| `failover.provider` | `"glm"` (or first provider) | Provider key used for 429 failover |
-| `failover.cooldownMs` | `600000` | Milliseconds before probing Claude again for new sessions (10 minutes) |
-| `retry.attempts` | `3` | Times the SAME provider is retried with backoff when it answers 429/5xx |
+| `proxy.enabled` | `false` | Accept HTTPS-proxy connections for Remote Control. Off by default, so the router is never an open proxy; `node tools/setup.mjs proxy enable --go` turns it on and `proxy disable --go` off |
+| `failover.enabled` | `true` | Automatically switch to the failover chain on Claude 429 usage limits |
+| `failover.chain` | first provider | Ordered providers that take over when Claude is out of quota or a provider keeps failing; unknown names are skipped (the old single `failover.provider` is still read) |
+| `failover.cooldownMs` | `600000` | Milliseconds before probing Claude again for new sessions (10 minutes, minimum `60000`) |
+| `retry.enabled` | `true` | Master switch for retrying a failing provider; `false` keeps the other retry settings for later |
+| `retry.attempts` | `3` | Times the SAME provider is retried with backoff when it answers 429/5xx; `0` means retry forever |
 | `retry.delayMs` | `2000` | First retry delay; multiplied by `retry.backoff` each attempt |
 | `retry.backoff` | `2` | Multiplier between retries (2s → 4s → …), capped by `retry.maxDelayMs` |
 | `retry.maxDelayMs` | `10000` | Longest single wait; a longer `Retry-After` keeps polling at this interval |
-| `retry.failover` | `false` | Opt-in: after retries are exhausted, forward the original request to `failover.provider` instead of returning the error |
+| `retry.failover` | `false` | Opt-in: after retries are exhausted, forward the original request to the next provider in the chain instead of returning the error |
+| `providers.<name>.retry` | `true` | Per-provider switch: `false` never retries this provider (failure returns at once); `true` follows the global `retry`; or a partial object like `{ "attempts": 5 }` overrides just those fields |
+| `providers.<name>.fallback` | the chain | Who takes over from this provider: `false` for nobody, or a list like `["glm"]` |
 | `providers.<name>.preset` | `<name>` | Optional preset (`zai`, `glm`, `deepseek`, `kimi`, `minimax`, `openrouter`, `gemini`, `magpie`) |
 | `providers.<name>.baseUrl` | (from preset) | Anthropic-compatible upstream URL for this provider |
 | `providers.<name>.token` | (required) | Literal token or `"env:ENV_VAR_NAME"` |
@@ -131,11 +183,16 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 | `/provider claude` | Switch the current conversation back to Claude (rebuilds prompt cache on next turn) |
 | `/provider ping` | Probe live latency and HTTP status across all configured providers |
 | `/provider probe` | Reset the 429 cooldown timer so the next new session tries Claude immediately |
+| `/provider alias [haiku\|sonnet\|opus] [<name>\|claude]` | Inspect or point a Claude model alias at a provider (updates both `settings.json` and `matchModels`) |
+| `/provider failover [on\|off\|<a,b>]` | Turn 429 failover on/off or update `failover.chain` |
+| `/provider retry [on\|off]` | Turn automatic provider retries on or off |
+| `/provider rc [on\|off]` | Turn Remote Control HTTPS proxy mode on or off (applies to new sessions) |
 
 ## Cost, privacy, and permissions
 
 - **Network and data flow:** The router listens only on `127.0.0.1:<port>`. Requests go strictly to `claudeUrl` (`https://api.anthropic.com`) or the `baseUrl` endpoints you configure. `/provider ping` sends a `max_tokens: 1` request to each configured provider when you trigger it. No telemetry or analytics exist.
 - **Local files:** Reads `~/.claude/model-relay.json` (or `custom-agent.json`) and writes session sticky state to `~/.claude/model-relay-state.json` plus local logs (`custom-agent-router.log` and `custom-agent-requests.log`, auto-truncated at 5 MB).
+- **Local certificate (proxy mode only):** `~/.claude/model-relay-pki/` holds a public CA file and one leaf certificate with its key (restricted to your user). The CA is limited to `api.anthropic.com` and trusted only through `NODE_EXTRA_CA_CERTS`; delete the folder or run `proxy disable --go` to stop using it.
 - **Plugin permissions:** Inspect all hooks, state keys, and env access at any time by running `claude plugin validate /path/to/model-relay`.
 
 ## Supported environments
@@ -156,12 +213,14 @@ Configuration lives in `~/.claude/model-relay.json` (or legacy `~/.claude/custom
 |---|---|
 | `/provider` says config is missing or invalid | Run `node tools/setup.mjs doctor` to verify JSON syntax and check if any `env:VAR` variables are unset in your shell |
 | Status bar shows `Relay offline: connected directly to Claude` | The plugin automatically bypassed a stopped router so your chat keeps working; run `node tools/setup.mjs doctor` or check `~/.claude/custom-agent-router.log` |
+| Remote Control says it is only available via `api.anthropic.com` | Claude Code still uses the relay as its API address; run `node tools/setup.mjs proxy enable --go` and start a new session |
+| Claude Code cannot connect after enabling proxy mode | The router is probably down: run `node tools/setup.mjs proxy status`, start it with `node tools/setup.mjs rc`, or go back with `node tools/setup.mjs proxy disable --go` |
 | Tools are missing on a third-party provider | Set `"stripToolSearch": true` on that provider in `model-relay.json` so `ToolSearch` does not hide other tools |
 
 ## Uninstall
 
-1. Run `claude plugin uninstall model-relay@model-relay` and remove `ANTHROPIC_BASE_URL` from `~/.claude/settings.json`.
-2. Delete optional state files (`~/.claude/model-relay.json`, `~/.claude/model-relay-state.json`, `~/.claude/custom-agent-router.log`, `~/.claude/custom-agent-requests.log`).
+1. Run `claude plugin uninstall model-relay@model-relay` and remove `ANTHROPIC_BASE_URL` from `~/.claude/settings.json` (in proxy mode remove `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` instead).
+2. Delete optional state files (`~/.claude/model-relay.json`, `~/.claude/model-relay-state.json`, `~/.claude/model-relay-pki/`, `~/.claude/custom-agent-router.log`, `~/.claude/custom-agent-requests.log`).
 
 ## Run from source
 

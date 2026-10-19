@@ -6,6 +6,37 @@ All notable changes to `model-relay` are documented in this file. Format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-20
+
+Use Remote Control without losing the relay (`proxy.enabled` with a local CA constrained to `api.anthropic.com`), point `haiku` / `sonnet` / `opus` aliases at any provider in one command (`setup.mjs alias` & `/provider alias`), and spawn provider subagents on the fly (`subagent_type: "model-relay:<name>"`) without `.claude/agents/*.md` files or restarting your session. The `/provider` panel also adds live toggles for 429 failover (`failover.chain`), retries (`retry.enabled`), and Remote Control (`f` / `t` / `x`).
+
+**Upgrading:** Pull the latest version or run `claude plugin update model-relay@model-relay`. Run `node tools/setup.mjs migrate --go` if you want to clean up legacy config keys.
+
+### Added
+
+- **Remote Control with the relay still in the path (HTTPS proxy mode):** Claude Code keeps `api.anthropic.com` as its address, which Remote Control requires, and uses the relay as its `HTTPS_PROXY`. The relay answers for `api.anthropic.com` with its own certificate and routes model calls exactly as before (providers, sticky 429 failover, retries); token refresh, Remote Control traffic and WebSocket upgrades pass to Anthropic unchanged, and every other host is a plain byte tunnel. Opt-in: off by default, so the router never acts as an open proxy for anyone who does not use Remote Control. Setting: `proxy.enabled`.
+- **Name-constrained local certificate authority:** The CA can only vouch for `api.anthropic.com`, its private key is discarded after it signs the one leaf certificate, and only processes that carry `NODE_EXTRA_CA_CERTS` trust it. Without a usable certificate the relay tunnels `api.anthropic.com` untouched, so Claude Code keeps working.
+- **`setup.mjs proxy` and `setup.mjs rc`:** `proxy status|enable|disable|renew` (add `--go` to apply) switches `settings.json` between API-address mode and proxy mode, keeps a `settings.json.relay-backup` copy and refuses settings it does not own; `rc` starts the router when needed and then runs `claude remote-control`.
+- **Failover chain:** `failover.chain` lists the providers that take over, in order. When Claude hits its limit the first one answers, and with `retry.failover` a provider that keeps failing hands the request to the next one, never back to one it already tried. A provider can override this with `providers.<name>.fallback` (`false` for nobody, or its own list).
+- **Retry master switch:** `retry.enabled` set to `false` turns retrying off everywhere and keeps the other retry settings for later.
+- **Switches in the `/provider` panel:** three rows turn 429 failover, retry and Remote Control on or off (hotkeys `f`, `t`, `x`). Remote Control asks for confirmation first because it rewrites `settings.json`; the panel changes the file through the same `set` and `proxy` commands of `setup.mjs`.
+- **Config commands in `setup.mjs`:** `set` changes one switch or list after validating it, `providers` shows routes, failover and retry per provider, `remove` deletes a provider from the file and from every failover list, and `migrate` moves an old file to the current layout. Edits keep a `.relay-backup` copy, tokens are never printed, and the router reads the result on its next request.
+- **First-class model alias management (`setup.mjs alias` & `/provider alias`):** Inspect or point `haiku`, `sonnet`, `opus`, or `subagent` (`CLAUDE_CODE_SUBAGENT_MODEL`) at any provider or back to Claude in one command, keeping `~/.claude/settings.json` (`ANTHROPIC_DEFAULT_*_MODEL`) and `~/.claude/model-relay.json` (`matchModels`) in sync. `/provider` and the panel now display model aliases separately from 429 failover and support `/provider alias|failover|retry|rc` directly from the prompt.
+- **Dynamic `model-relay:<provider>` subagent types (`$.agent.register` & `agent.spawn`):** Because Claude Code's `Agent` tool validates `model` against `"sonnet"|"opus"|"haiku"|"fable"`, the plugin dynamically registers `model-relay:<name>` (such as `model-relay:glm` and `model-relay:gemini`) with full parent tools and the provider's model ID, and locks that model in `on('agent.spawn')`—no static `.claude/agents/*.md` file or session restart needed.
+
+### Changed
+
+- **`doctor` understands proxy mode:** `doctor --fix` no longer puts `ANTHROPIC_BASE_URL` back when proxy mode is on, and `/__health` reports proxy state and connection counts.
+- **Cleaner config layout:** `failover` holds `enabled`, `chain` and `cooldownMs`, and providers live only under `providers`. The old top-level `baseUrl`, `token`, `model`, `gemini`, `failoverEnabled`, `probeEveryMin` and `failoverProvider` still work and are read as if migrated; `migrate --go` rewrites the file with the same behaviour.
+- **`doctor` checks the config:** it warns about an old layout, failover names that match no provider, and a model name that another provider's `matchModels` claims first, and its failover line shows the chain and the cooldown.
+- **`/__health` reports the switches:** `failoverChain` and `config` show what the router is really doing, so the panel never guesses.
+
+### Fixed
+
+- **`failover.cooldownMs` was ignored:** the documented setting had no effect because the router read `probeEveryMin`. `failover.cooldownMs` now sets how long new sessions stay off Claude, with a one-minute minimum.
+- **A half-saved config no longer fails requests:** the router keeps the last good config when the file cannot be read for a moment, and the `setup.mjs` commands write files in one step.
+- **Claude model names matched via `matchModels` are now rewritten on the wire:** when a request carrying a `claude-*` model (such as a hardcoded `claude-haiku-4-5-20251001`) matches a provider's `matchModels`, the router now rewrites the body's `model` field to that provider's target model instead of forwarding the `claude-*` name unchanged.
+
 ## [0.5.0] - 2026-10-18
 
 A provider that answers 429 or 5xx no longer kills your turn: the relay retries the SAME provider with exponential backoff, polling at `retry.maxDelayMs` when `Retry-After` asks for longer, so Claude Code never sees the intermediate failures. Cross-provider failover after exhausted retries is available as an opt-in.
@@ -14,9 +45,10 @@ A provider that answers 429 or 5xx no longer kills your turn: the relay retries 
 
 ### Added
 
-- **Transparent same-provider retries with backoff:** Failing provider answers (429, 500, 502, 503, 504, 529) are retried on the same provider up to `retry.attempts` times with `retry.delayMs` × `retry.backoff` waits, capped by `retry.maxDelayMs`. Settings: `retry`.
+- **Transparent same-provider retries with backoff:** Failing provider answers (429, 500, 502, 503, 504, 529) are retried on the same provider up to `retry.attempts` times with `retry.delayMs` × `retry.backoff` waits, capped by `retry.maxDelayMs`. `retry.attempts: 0` retries forever (until success or the client disconnects). Settings: `retry`.
 - **`Retry-After` awareness:** A provider asking to wait longer than `retry.maxDelayMs` keeps being polled at that cap instead of giving up early. Setting: `retry.maxDelayMs`.
 - **Opt-in cross-provider failover:** With `retry.failover: true`, the original (un-rewritten) request is forwarded to `failover.provider` once retries run out, so the turn completes on the backup model rather than returning the error. Setting: `retry.failover`.
+- **Per-provider retry switch:** `providers.<name>.retry` turns retrying off for one provider (`false`), follows the global settings (`true`, the default), or passes a partial object (e.g. `{ "attempts": 5 }`) to override individual fields. Setting: `providers.<name>.retry`.
 
 ## [0.4.0] - 2026-10-17
 
@@ -49,7 +81,8 @@ Type `/provider` to open an interactive `AbovePrompt` control panel right above 
 
 - **Legacy child-process `custom_agent` tool:** Removed the deprecated `claude.exe -p` child-process wrapper so the plugin focuses purely on fast, zero-overhead HTTP relay and session routing.
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cablate/model-relay/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cablate/model-relay/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cablate/model-relay/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cablate/model-relay/releases/tag/v0.3.0

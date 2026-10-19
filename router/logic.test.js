@@ -10,7 +10,7 @@ test('config defaults and legacy compatibility', () => {
   assert.strictEqual(L.parseCfg({ baseUrl: 'ftp://x', token: 't', model: 'm' }), null)
   assert.strictEqual(cfg.port, 8950)
   assert.strictEqual(cfg.claudeUrl, 'https://api.anthropic.com')
-  assert.strictEqual(cfg.probeEveryMs, 600000)
+  assert.strictEqual(cfg.cooldownMs, 600000)
   assert.strictEqual(cfg.failoverProvider, 'glm')
   assert.ok(cfg.providers.glm)
 })
@@ -28,7 +28,7 @@ test('multi-provider config and env:VAR token resolution', () => {
 
   assert.strictEqual(multi.port, 8955)
   assert.strictEqual(multi.failoverProvider, 'deepseek')
-  assert.strictEqual(multi.probeEveryMs, 300000)
+  assert.strictEqual(multi.cooldownMs, 300000)
   assert.strictEqual(multi.providers.glm.token, 'resolved-val')
   assert.strictEqual(multi.providers.gemini.stripCacheControl, true)
   assert.strictEqual(multi.providers.gemini.authHeader, 'both')
@@ -62,19 +62,19 @@ test('failover: new sessions trial Claude when due, otherwise failover provider'
 
 test('a session that moved to GLM stays there after Claude recovers', () => {
   let s = L.onLimited(L.emptyState(), cfg, 1000)
-  s = L.setSession(s, 'long', true, 1000)
+  s = L.setSticky(s, 'long', 'glm', 1000)
   s = L.onClaudeOk(s)
   assert.strictEqual(L.decide(s, cfg, OPUS, 'long', 5e6), 'zai-rewrite', 'sticky session keeps GLM')
   assert.strictEqual(L.decide(s, cfg, OPUS, 'fresh', 5e6), 'claude', 'other sessions back on Claude')
   assert.strictEqual(L.decide(s, cfg, OPUS, undefined, 5e6), 'claude', 'no session id: no stickiness')
-  s = L.setSession(s, 'long', false, 6e6)
+  s = L.setSticky(s, 'long', 'claude', 6e6)
   assert.strictEqual(L.decide(s, cfg, OPUS, 'long', 6e6), 'claude', 'released session returns')
-  assert.deepStrictEqual(L.setSession(s, '', true, 1), s, 'empty id ignored')
+  assert.deepStrictEqual(L.setSticky(s, '', 'glm', 1), s, 'empty id ignored')
 })
 
 test('sticky sessions expire after a week', () => {
-  const s = L.setSession(L.setSession(L.emptyState(), 'old', true, 0), 'new', true, 8 * 24 * 3600e3)
-  assert.deepStrictEqual(Object.keys(L.pruneGlm(s, 8 * 24 * 3600e3).onGlm), ['new'])
+  const s = L.setSticky(L.setSticky(L.emptyState(), 'old', 'glm', 0), 'new', 'glm', 8 * 24 * 3600e3)
+  assert.deepStrictEqual(Object.keys(L.pruneSticky(s, 8 * 24 * 3600e3).sticky), ['new'])
 })
 
 test('only a usage-limit 429 triggers failover', () => {
@@ -85,10 +85,17 @@ test('only a usage-limit 429 triggers failover', () => {
 })
 
 test('model rewrite and upstream path', () => {
-  const out = JSON.parse(L.forZai(Buffer.from('{"model":"claude-opus-5-5","x":1}'), 'glm-5.3[1m]').toString())
+  const out = JSON.parse(L.rewriteBody(Buffer.from('{"model":"claude-opus-5-5","x":1}'), { model: 'glm-5.3[1m]' }).toString())
   assert.deepStrictEqual(out, { model: 'glm-5.3', x: 1 })
   const plain = Buffer.from('{"model":"glm-5.3","tools":[{"name":"Read"}]}')
-  assert.strictEqual(L.forZai(plain, null), plain)
+  assert.strictEqual(L.rewriteBody(plain, {}), plain)
+  // When a Claude tier/model name is routed via matchModels (e.g. "haiku" -> deepseek), defaultModel rewrites it
+  const aliased = JSON.parse(L.rewriteBody(Buffer.from('{"model":"claude-haiku-4-5-20251001"}'), { defaultModel: 'deepseek-chat', stripToolSearch: false }).toString())
+  assert.strictEqual(aliased.model, 'deepseek-chat')
+  // A provider's own sub-model (e.g. deepseek-reasoner) is preserved when only defaultModel is set
+  const native = JSON.parse(L.rewriteBody(Buffer.from('{"model":"deepseek-reasoner"}'), { defaultModel: 'deepseek-chat', stripToolSearch: false }).toString())
+  assert.strictEqual(native.model, 'deepseek-reasoner')
+  assert.deepStrictEqual(L.detectAliases(L.parseCfg({ providers: { glm: { token: 't' } } })), { haiku: 'glm' })
   assert.strictEqual(L.upstreamPath('https://api.z.ai/api/anthropic', '/v1/messages?beta=true'), '/api/anthropic/v1/messages?beta=true')
   assert.strictEqual(L.upstreamPath('https://api.anthropic.com', '/v1/messages'), '/v1/messages')
 })
@@ -96,8 +103,8 @@ test('model rewrite and upstream path', () => {
 test('z.ai requests lose ToolSearch and deferred placeholders', () => {
   const tools = [{ name: 'Read' }, { name: 'ToolSearch' }, { name: 'DeferredToolPlaceholder', defer_loading: true }, { name: 'Bash' }]
   const body = Buffer.from(JSON.stringify({ model: 'glm-5.3', tools }))
-  assert.deepStrictEqual(JSON.parse(L.forZai(body, null).toString()).tools, [{ name: 'Read' }, { name: 'Bash' }])
-  const rw = JSON.parse(L.forZai(body, 'glm-5.3[1m]').toString())
+  assert.deepStrictEqual(JSON.parse(L.rewriteBody(body, {}).toString()).tools, [{ name: 'Read' }, { name: 'Bash' }])
+  const rw = JSON.parse(L.rewriteBody(body, { model: 'glm-5.3[1m]' }).toString())
   assert.strictEqual(rw.model, 'glm-5.3')
   assert.deepStrictEqual(rw.tools.map((t) => t.name), ['Read', 'Bash'])
 })
@@ -121,13 +128,34 @@ test('provider retry waits: statuses, backoff, Retry-After, exhaustion', () => {
   assert.strictEqual(L.retryWaitMs(429, {}, 0, fast.retry), 500, 'custom base delay')
   assert.strictEqual(L.retryWaitMs(429, {}, 1, fast.retry), null, 'single attempt then stop')
   assert.strictEqual(fast.retry.failover, true, 'failover can be turned on')
+  const endless = L.parseCfg({ providers: { glm: { token: 't', retry: { attempts: 0, maxDelayMs: 30000 } } } })
+  assert.strictEqual(L.retryWaitMs(429, {}, 500, endless.providers.glm.retryCfg), 30000, 'attempts:0 retries without end, polling at maxDelayMs')
+})
+
+test('per-provider retry switch: off, inherit, and partial override', () => {
+  const cfg = L.parseCfg({
+    retry: { attempts: 4, delayMs: 3000, failover: true },
+    providers: {
+      glm: { token: 't', retry: false },
+      deepseek: { token: 't' },
+      kimi: { token: 't', retry: { attempts: 1, failover: false } },
+    },
+  })
+  assert.strictEqual(cfg.providers.glm.retryCfg, null, 'retry:false never retries')
+  assert.strictEqual(cfg.providers.deepseek.retryCfg.attempts, 4, 'no retry field inherits the global settings')
+  assert.strictEqual(cfg.providers.deepseek.retryCfg.delayMs, 3000, 'inherited delayMs')
+  assert.strictEqual(cfg.providers.kimi.retryCfg.attempts, 1, 'partial override wins')
+  assert.strictEqual(cfg.providers.kimi.retryCfg.delayMs, 3000, 'partial override keeps global defaults for the rest')
+  assert.strictEqual(cfg.providers.kimi.retryCfg.failover, false, 'partial override of failover')
+  assert.strictEqual(L.retryWaitMs(429, {}, 0, cfg.providers.kimi.retryCfg), 3000, 'kimi still waits per merged settings')
+  assert.strictEqual(L.retryWaitMs(429, {}, 1, cfg.providers.kimi.retryCfg), null, 'kimi exhausts after its single attempt')
 })
 
 test('state parsing tolerates junk and old files', () => {
   assert.deepStrictEqual(L.parseState(null), L.emptyState())
   const old = L.parseState({ mode: 'glm', failoverSince: 5, onGlm: { a: 1, b: 'x' } })
   assert.strictEqual(old.failoverSince, 5)
-  assert.deepStrictEqual(old.onGlm, { a: 1 })
+  assert.ok(!('onGlm' in old), 'the legacy per-provider views are gone')
   assert.strictEqual(old.sticky.a.provider, 'glm')
   assert.ok(!('mode' in old), 'global mode no longer exists')
 })
@@ -135,16 +163,54 @@ test('state parsing tolerates junk and old files', () => {
 test('gemini route: model name or sticky session, off without config', () => {
   const g = L.parseCfg({ baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'glm-5.3[1m]', gemini: { baseUrl: 'https://x', token: 'k', model: 'gemini-4-argon-lb' } })
   assert.strictEqual(L.decide(L.emptyState(), g, 'gemini-4-argon-lb', 'a', 0), 'gemini')
-  let s = L.setGemini(L.setSession(L.emptyState(), 'a', true, 1), 'a', true, 2)
-  assert.strictEqual(s.onGlm.a, undefined, 'leaves GLM')
+  let s = L.setSticky(L.setSticky(L.emptyState(), 'a', 'glm', 1), 'a', 'gemini', 2)
+  assert.strictEqual(s.sticky.a.provider, 'gemini', 'moving to another provider replaces the pin')
   assert.strictEqual(L.decide(s, g, OPUS, 'a', 3), 'gemini-rewrite')
   assert.strictEqual(L.decide(s, cfg, OPUS, 'a', 3), 'claude', 'no gemini config: ignored')
-  s = L.setGemini(s, 'a', false, 4)
+  s = L.setSticky(s, 'a', 'claude', 4)
   assert.strictEqual(L.decide(s, g, OPUS, 'a', 5), 'claude')
 })
 
 test('gemini requests lose cache_control everywhere', () => {
   const b = Buffer.from(JSON.stringify({ model: 'm', system: [{ type: 'text', text: 'x', cache_control: { type: 'ephemeral' } }], messages: [{ role: 'user', content: [{ type: 'text', text: 'y', cache_control: { type: 'ephemeral' } }] }] }))
-  assert.ok(!L.forZai(b, null, true).toString().includes('cache_control'))
-  assert.ok(L.forZai(b, null, false).toString().includes('cache_control'))
+  assert.ok(!L.rewriteBody(b, { stripCacheControl: true }).toString().includes('cache_control'))
+  assert.ok(L.rewriteBody(b, { stripCacheControl: false }).toString().includes('cache_control'))
+})
+
+test('proxy config: off unless explicitly enabled', () => {
+  const base = { baseUrl: 'https://api.z.ai/api/anthropic', token: 't', model: 'm' }
+  assert.deepStrictEqual(cfg.proxy, { enabled: false }, 'default')
+  for (const raw of [false, true, {}, { enabled: false }, { enabled: 'yes' }, 1, null]) {
+    assert.strictEqual(L.parseCfg({ ...base, proxy: raw }).proxy.enabled, false, JSON.stringify(raw))
+  }
+  assert.strictEqual(L.parseCfg({ ...base, proxy: { enabled: true } }).proxy.enabled, true)
+})
+
+test('CONNECT targets are parsed strictly', () => {
+  assert.deepStrictEqual(L.parseConnectTarget('API.Anthropic.com:443'), { host: 'api.anthropic.com', port: 443 })
+  assert.deepStrictEqual(L.parseConnectTarget('[::1]:8443'), { host: '::1', port: 8443 })
+  for (const bad of ['', 'api.anthropic.com', 'a b:443', 'x:0', 'x:70000', 'x:443/path', null, undefined]) {
+    assert.strictEqual(L.parseConnectTarget(bad), null, String(bad))
+  }
+})
+
+test('only api.anthropic.com:443 is opened up, and only with a usable certificate', () => {
+  const on = { enabled: true }
+  const anthropic = { host: 'api.anthropic.com', port: 443 }
+  assert.strictEqual(L.proxyAction(on, anthropic, true), 'mitm')
+  assert.strictEqual(L.proxyAction(on, anthropic, false), 'tunnel', 'no certificate: stay usable, unrouted')
+  assert.strictEqual(L.proxyAction(on, { host: 'api.anthropic.com', port: 8443 }, true), 'tunnel')
+  assert.strictEqual(L.proxyAction(on, { host: 'claude.ai', port: 443 }, true), 'tunnel')
+  assert.strictEqual(L.proxyAction(on, { host: 'evil-api.anthropic.com.example', port: 443 }, true), 'tunnel')
+  assert.strictEqual(L.proxyAction({ enabled: false }, anthropic, true), 'refuse')
+  assert.strictEqual(L.proxyAction(on, null, true), 'refuse')
+})
+
+test('inside the opened tunnel only model calls are routed', () => {
+  assert.strictEqual(L.isRoutedRequest('POST', '/v1/messages'), true)
+  assert.strictEqual(L.isRoutedRequest('POST', '/v1/messages?beta=true'), true)
+  assert.strictEqual(L.isRoutedRequest('POST', '/v1/messages/count_tokens?beta=true'), true)
+  for (const [m, u] of [['GET', '/v1/messages'], ['POST', '/v1/oauth/token'], ['POST', '/v1/messagesX'], ['GET', '/api/oauth/profile'], ['POST', '/v1/code/sessions'], ['POST', undefined]]) {
+    assert.strictEqual(L.isRoutedRequest(m, u), false, `${m} ${u}`)
+  }
 })

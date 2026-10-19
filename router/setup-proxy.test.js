@@ -1,0 +1,110 @@
+'use strict'
+// `setup.mjs proxy` against a throwaway config directory: it must change settings.json only on --go,
+// keep everything else in the file, refuse to touch settings it does not own, and be reversible.
+const test = require('node:test')
+const assert = require('node:assert')
+const fs = require('node:fs')
+const http = require('node:http')
+const net = require('node:net')
+const os = require('node:os')
+const path = require('node:path')
+const { spawnSync } = require('node:child_process')
+
+const setup = path.join(__dirname, '..', 'tools', 'setup.mjs')
+
+async function freePort() {
+  const s = net.createServer()
+  await new Promise((r) => s.listen(0, '127.0.0.1', r))
+  const p = s.address().port
+  await new Promise((r) => s.close(r))
+  return p
+}
+
+function health(port) {
+  return new Promise((resolve) => {
+    http.get(`http://127.0.0.1:${port}/__health`, (res) => {
+      const ch = []
+      res.on('data', (c) => ch.push(c))
+      res.on('end', () => resolve(JSON.parse(Buffer.concat(ch).toString('utf8'))))
+    }).on('error', () => resolve(null))
+  })
+}
+
+function run(dir, ...args) {
+  const r = spawnSync(process.execPath, [setup, ...args], { encoding: 'utf8', env: { ...process.env, CLAUDE_CONFIG_DIR: dir } })
+  return { code: r.status, out: `${r.stdout}${r.stderr}` }
+}
+
+async function fixture(t, settings) {
+  const port = await freePort()
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-setup-'))
+  fs.writeFileSync(path.join(dir, 'model-relay.json'), JSON.stringify({ port, providers: { glm: { baseUrl: 'http://127.0.0.1:9', token: 'dummy', model: 'glm-5.3' } } }))
+  const settingsPath = path.join(dir, 'settings.json')
+  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2))
+  t.after(async () => {
+    const h = await health(port)
+    if (h && h.pid) {
+      try {
+        process.kill(h.pid)
+      } catch {}
+    }
+  })
+  const cfgPath = path.join(dir, 'model-relay.json')
+  return { port, dir, settingsPath, read: () => JSON.parse(fs.readFileSync(settingsPath, 'utf8')), proxyOn: () => JSON.parse(fs.readFileSync(cfgPath, 'utf8')).proxy?.enabled === true }
+}
+
+test('proxy enable is a dry run until --go, then switches modes and keeps unrelated settings', async (t) => {
+  const f = await fixture(t, { model: 'sonnet', env: { FOO: '1', ANTHROPIC_BASE_URL: '' } })
+  const url = `http://127.0.0.1:${f.port}`
+  const fixed = { model: 'sonnet', env: { FOO: '1', ANTHROPIC_BASE_URL: url } }
+  fs.writeFileSync(f.settingsPath, JSON.stringify(fixed))
+
+  const dry = run(f.dir, 'proxy', 'enable')
+  assert.strictEqual(dry.code, 0, dry.out)
+  assert.match(dry.out, /Dry run/)
+  assert.deepStrictEqual(f.read(), fixed, 'a dry run changes nothing')
+  assert.ok(!fs.existsSync(path.join(f.dir, 'model-relay-pki')), 'and creates no certificate')
+  assert.strictEqual(f.proxyOn(), false, 'the router stays closed to proxy connections until enabled')
+
+  const go = run(f.dir, 'proxy', 'enable', '--go')
+  assert.strictEqual(go.code, 0, go.out)
+  const after = f.read()
+  assert.strictEqual(after.model, 'sonnet')
+  assert.strictEqual(after.env.FOO, '1')
+  assert.strictEqual(after.env.ANTHROPIC_BASE_URL, undefined, 'Remote Control needs the API address left alone')
+  assert.strictEqual(after.env.HTTPS_PROXY, url)
+  assert.ok(after.env.NODE_EXTRA_CA_CERTS.endsWith('model-relay-pki/ca.pem'))
+  assert.strictEqual(after.env.NO_PROXY, '127.0.0.1,localhost,::1')
+  assert.strictEqual(f.proxyOn(), true, 'enable opens the router to proxy connections')
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(`${f.settingsPath}.relay-backup`, 'utf8')), fixed, 'the previous file is kept')
+
+  const status = run(f.dir, 'proxy', 'status')
+  assert.match(status.out, /HTTPS proxy \(Remote Control works\)/)
+  assert.match(status.out, /Self-test .*✓ ok/)
+
+  const doctor = run(f.dir, 'doctor')
+  assert.match(doctor.out, /Remote Control works/, 'doctor recognises the proxy wiring')
+  const doctorFix = run(f.dir, 'doctor', '--fix')
+  assert.strictEqual(f.read().env.ANTHROPIC_BASE_URL, undefined, 'doctor --fix must not undo proxy mode')
+  assert.ok(doctorFix.out.length > 0)
+
+  const off = run(f.dir, 'proxy', 'disable', '--go')
+  assert.strictEqual(off.code, 0, off.out)
+  assert.deepStrictEqual(f.read(), fixed, 'disable puts the settings back exactly')
+  assert.strictEqual(f.proxyOn(), false, 'and closes the router to proxy connections again')
+})
+
+test('proxy enable refuses settings it does not own', async (t) => {
+  const f = await fixture(t, { env: { HTTPS_PROXY: 'http://corp.example:3128' } })
+  const a = run(f.dir, 'proxy', 'enable', '--go')
+  assert.strictEqual(a.code, 1)
+  assert.match(a.out, /chaining proxies is not supported/)
+  assert.strictEqual(f.read().env.HTTPS_PROXY, 'http://corp.example:3128')
+  assert.strictEqual(f.proxyOn(), false, 'a refused enable leaves the router closed')
+
+  const g = await fixture(t, { env: { ANTHROPIC_BASE_URL: 'https://gateway.example' } })
+  const b = run(g.dir, 'proxy', 'enable', '--go')
+  assert.strictEqual(b.code, 1)
+  assert.match(b.out, /not this relay/)
+  assert.strictEqual(g.read().env.ANTHROPIC_BASE_URL, 'https://gateway.example')
+})

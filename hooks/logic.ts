@@ -2,6 +2,7 @@ import type { PanelData, ProviderStat } from '../types'
 
 export interface RelayCfg {
   providers: Record<string, string> // provider name -> model id
+  aliases: Record<string, string> // haiku | sonnet | opus -> provider name
   failoverProvider: string
   model: string // primary failover model (for backward compatibility)
   gemini: string | null // optional gemini model (for backward compatibility)
@@ -11,15 +12,21 @@ export interface RelayCfg {
 
 export type AgentCfg = RelayCfg
 
-const PRESET_DEFAULTS: Record<string, { baseUrl: string; model: string }> = {
-  zai: { baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-5.3[1m]' },
-  glm: { baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-5.3[1m]' },
-  deepseek: { baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-chat' },
-  kimi: { baseUrl: 'https://api.moonshot.ai/anthropic', model: 'kimi-k2' },
-  minimax: { baseUrl: 'https://api.minimax.io/anthropic', model: 'MiniMax-M1' },
-  openrouter: { baseUrl: 'https://openrouter.ai/api', model: 'anthropic/claude-sonnet-4' },
-  gemini: { baseUrl: 'http://127.0.0.1:3425', model: 'gemini-4-argon' },
-  magpie: { baseUrl: 'http://127.0.0.1:3425', model: 'gemini-4-argon' },
+const PRESET_DEFAULTS: Record<string, { baseUrl: string; model: string; matchModels?: string[] }> = {
+  zai: { baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-5.3[1m]', matchModels: ['^glm', 'haiku'] },
+  glm: { baseUrl: 'https://api.z.ai/api/anthropic', model: 'glm-5.3[1m]', matchModels: ['^glm', 'haiku'] },
+  deepseek: { baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-chat', matchModels: ['^deepseek'] },
+  kimi: { baseUrl: 'https://api.moonshot.ai/anthropic', model: 'kimi-k2', matchModels: ['^kimi', '^moonshot'] },
+  minimax: { baseUrl: 'https://api.minimax.io/anthropic', model: 'MiniMax-M1', matchModels: ['^minimax'] },
+  openrouter: { baseUrl: 'https://openrouter.ai/api', model: 'anthropic/claude-sonnet-4', matchModels: ['^openrouter/'] },
+  gemini: { baseUrl: 'http://127.0.0.1:3425', model: 'gemini-4-argon', matchModels: ['^gemini'] },
+  magpie: { baseUrl: 'http://127.0.0.1:3425', model: 'gemini-4-argon', matchModels: ['^gemini'] },
+}
+
+const ALIAS_SAMPLES: Record<string, string> = {
+  haiku: 'claude-haiku-5-5',
+  sonnet: 'claude-sonnet-5-5',
+  opus: 'claude-opus-5-5',
 }
 
 export function parseCfg(raw: unknown): RelayCfg | null {
@@ -28,6 +35,7 @@ export function parseCfg(raw: unknown): RelayCfg | null {
   const str = (v: unknown) => (typeof v === 'string' && v.length > 0 ? v : null)
 
   const providers: Record<string, string> = {}
+  const matchers: Record<string, RegExp[]> = {}
 
   if (typeof r.providers === 'object' && r.providers !== null) {
     for (const [k, v] of Object.entries(r.providers as Record<string, unknown>)) {
@@ -41,6 +49,14 @@ export function parseCfg(raw: unknown): RelayCfg | null {
       const model = str(pv.model ?? preset?.model)
       if (url && /^https?:\/\//.test(url) && token && model) {
         providers[key] = model
+        const rawPats = Array.isArray(pv.matchModels) && pv.matchModels.length > 0
+          ? (pv.matchModels as unknown[]).filter((m): m is string => typeof m === 'string' && m.length > 0)
+          : (preset?.matchModels ?? [`^${key}`])
+        const res: RegExp[] = []
+        for (const pat of rawPats) {
+          try { res.push(new RegExp(pat, 'i')) } catch {}
+        }
+        matchers[key] = res
       }
     }
   }
@@ -52,23 +68,42 @@ export function parseCfg(raw: unknown): RelayCfg | null {
     const model = str(r.model)
     if (baseUrl && /^https?:\/\//.test(baseUrl) && token && model) {
       providers.glm = model
+      matchers.glm = [/^glm/i, /haiku/i]
     }
   }
   if (!providers.gemini && typeof r.gemini === 'object' && r.gemini !== null) {
     const gm = str((r.gemini as Record<string, unknown>).model)
-    if (gm) providers.gemini = gm
+    if (gm) {
+      providers.gemini = gm
+      matchers.gemini = [/^gemini/i]
+    }
   }
 
   const names = Object.keys(providers)
   if (names.length === 0) return null
 
+  const aliases: Record<string, string> = {}
+  for (const [slot, sample] of Object.entries(ALIAS_SAMPLES)) {
+    for (const k of names) {
+      if (matchers[k]?.some((re) => re.test(sample) || re.test(slot))) {
+        aliases[slot] = k
+        break
+      }
+    }
+  }
+
   const foObj = typeof r.failover === 'object' && r.failover !== null ? (r.failover as Record<string, unknown>) : null
-  const preferredFo = str(foObj?.provider ?? r.failoverProvider)?.toLowerCase()
+  // The first usable link of the failover chain leads; older files name a single provider
+  const chainFirst = Array.isArray(foObj?.chain)
+    ? (foObj.chain as unknown[]).map((n) => (typeof n === 'string' ? n.trim().toLowerCase() : '')).find((n) => n && providers[n])
+    : undefined
+  const preferredFo = chainFirst ?? str(foObj?.provider ?? r.failoverProvider)?.toLowerCase()
   const failoverProvider = preferredFo && providers[preferredFo] ? preferredFo : (providers.glm ? 'glm' : names[0]!)
   const port = typeof r.port === 'number' && Number.isInteger(r.port) && r.port > 1024 && r.port < 65536 ? r.port : 8950
 
   return {
     providers,
+    aliases,
     failoverProvider,
     model: providers[failoverProvider]!,
     gemini: providers.gemini ?? null,
@@ -113,6 +148,22 @@ export function routerScript(pluginRoot: string): string {
   return pluginRoot.replace(/[\\/]\.claude-plugin[\\/]?$/, '').replace(/\\/g, '/') + '/router/router.js'
 }
 
+const pluginBase = (pluginRoot: string) => pluginRoot.replace(/[\\/]\.claude-plugin[\\/]?$/, '').replace(/\\/g, '/')
+
+export const setupScript = (pluginRoot: string) => `${pluginBase(pluginRoot)}/tools/setup.mjs`
+
+export type Toggle = 'failover' | 'retry' | 'proxy'
+
+// The panel and `/provider` subcommands change settings through the same CLI a person would use
+export function toggleArgv(cfg: RelayCfg, script: string, which: Toggle, on: boolean): string[] {
+  if (which === 'proxy') return [cfg.nodePath, script, 'proxy', on ? 'enable' : 'disable', '--go']
+  return [cfg.nodePath, script, 'set', which === 'failover' ? 'failover.enabled' : 'retry.enabled', on ? 'on' : 'off']
+}
+
+export function setupCliArgv(cfg: RelayCfg, script: string, cliArgs: string[]): string[] {
+  return [cfg.nodePath, script, ...cliArgs]
+}
+
 // Detaches the router process on both Windows and POSIX platforms.
 export function startArgv(cfg: RelayCfg, script: string, configDir: string, isWin = true): string[] {
   if (isWin) {
@@ -134,8 +185,12 @@ export interface Health {
   nextClaudeTry: number
   sessionsOnCustom?: number
   providers?: Record<string, string>
+  aliases?: Record<string, string>
   failoverProvider?: string
+  failoverChain?: string[]
   stats?: Record<string, ProviderStat>
+  // What the router is doing right now; absent when it predates the switches
+  switches?: { failover: boolean; retry: boolean; proxy: boolean; proxyReady: boolean }
 }
 
 export function parseHealth(stdout: string): Health | null {
@@ -152,6 +207,14 @@ export function parseHealth(stdout: string): Health | null {
       }
       if (Object.keys(pMap).length > 0) providers = pMap
     }
+    let aliases: Record<string, string> | undefined
+    if (typeof j.aliases === 'object' && j.aliases !== null) {
+      const aMap: Record<string, string> = {}
+      for (const [k, v] of Object.entries(j.aliases as Record<string, unknown>)) {
+        if (typeof v === 'string' && v.length > 0) aMap[k.toLowerCase()] = v.toLowerCase()
+      }
+      aliases = aMap
+    }
     let stats: Record<string, ProviderStat> | undefined
     if (typeof j.stats === 'object' && j.stats !== null) {
       const sMap: Record<string, ProviderStat> = {}
@@ -166,14 +229,25 @@ export function parseHealth(stdout: string): Health | null {
     const failoverProvider = typeof j.failoverProvider === 'string' && j.failoverProvider.length > 0
       ? j.failoverProvider.toLowerCase()
       : undefined
+    const failoverChain = Array.isArray(j.failoverChain)
+      ? (j.failoverChain as unknown[]).filter((n): n is string => typeof n === 'string' && n.length > 0).map((n) => n.toLowerCase())
+      : undefined
+    const conf = typeof j.config === 'object' && j.config !== null ? (j.config as Record<string, unknown>) : null
+    const px = typeof j.proxy === 'object' && j.proxy !== null ? (j.proxy as Record<string, unknown>) : null
+    const switches = conf && typeof conf.failoverEnabled === 'boolean' && typeof conf.retryEnabled === 'boolean' && typeof conf.proxyEnabled === 'boolean'
+      ? { failover: conf.failoverEnabled, retry: conf.retryEnabled, proxy: conf.proxyEnabled, proxyReady: px?.certificate === true }
+      : undefined
     return {
       session,
       failoverSince: num(j.failoverSince),
       nextClaudeTry: num(j.nextClaudeTry),
       sessionsOnCustom: num(j.sessionsOnCustom ?? j.sessionsOnGlm),
       ...(providers ? { providers } : {}),
+      ...(aliases ? { aliases } : {}),
       ...(failoverProvider ? { failoverProvider } : {}),
+      ...(failoverChain && failoverChain.length > 0 ? { failoverChain } : {}),
       ...(stats ? { stats } : {}),
+      ...(switches ? { switches } : {}),
     }
   } catch {
     return null
@@ -210,6 +284,9 @@ export function buildPanelData(h: Health | null, cfg: RelayCfg, direct: boolean,
     nextClaudeTry: h?.nextClaudeTry ?? 0,
     sessionsOnCustom: h?.sessionsOnCustom ?? 0,
     providers,
+    aliases: h?.aliases ?? cfg.aliases,
+    failoverChain: h?.failoverChain && h.failoverChain.length > 0 ? h.failoverChain : [failoverProvider],
+    switches: h?.switches ?? null,
     stats: h?.stats ?? {},
     lang,
     now,
@@ -232,48 +309,136 @@ export function statusText(h: Health | null, modelOrCfg: string | RelayCfg, dire
   return lang === 'en' ? 'Main: Claude' : '主線：Claude'
 }
 
+function fmtLatency(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`
+}
+
 export function providerReport(h: Health | null, modelOrCfg: string | RelayCfg, now: number, gemini: string | null = null, lang: 'zh' | 'en' = 'zh'): string {
-  const { providers, failoverProvider, failoverModel } = resolveModelsMap(modelOrCfg, gemini, h)
+  const { providers, failoverProvider } = resolveModelsMap(modelOrCfg, gemini, h)
+  const en = lang === 'en'
   if (!h) {
-    return lang === 'en'
+    return en
       ? 'Relay is not responding; auto-restarting every 10s.'
       : '轉發站沒有回應；每 10 秒會自動重啟，稍後再試。'
   }
+
   let head = statusText(h, modelOrCfg, false, gemini, lang)
   if (h.failoverSince) {
     const mins = Math.max(0, Math.round((h.nextClaudeTry - now) / 60000))
-    head += lang === 'en'
+    head += en
       ? ` (retrying Claude in ~${mins}m; only new sessions switch back)`
       : `（約 ${mins} 分鐘後再試 Claude，恢復後只有新對話回到 Claude）`
   }
+
+  const aliases = h.aliases ?? (typeof modelOrCfg === 'object' ? modelOrCfg.aliases : { haiku: 'glm' })
+  const aliasPairs = Object.entries(aliases)
+    .filter(([, p]) => providers[p])
+    .map(([slot, p]) => `${slot} → ${p} (${providers[p]})`)
+  const aliasLine = en
+    ? `Model aliases: ${aliasPairs.length > 0 ? aliasPairs.join(', ') : 'none (all Claude tiers use main route)'}`
+    : `別名自動分流：${aliasPairs.length > 0 ? aliasPairs.join('、') : '無（子代理全走主線）'}`
+
+  const chain = h.failoverChain && h.failoverChain.length > 0 ? h.failoverChain : [failoverProvider]
+  const sw = h.switches
+  const foOn = sw ? sw.failover : true
+  const foSummary = foOn ? `● ${en ? 'on' : '開啟'} (${chain.join(' → ')})` : `○ ${en ? 'off' : '關閉'}`
+  const retrySummary = !sw || sw.retry ? `● ${en ? 'on' : '開啟'}` : `○ ${en ? 'off' : '關閉'}`
+  const rcSummary = sw?.proxy ? `● ${en ? 'on' : '開啟'}` : `○ ${en ? 'off' : '關閉'}`
+  const switchLine = en
+    ? `Global switches: 429 failover ${foSummary} · Retry ${retrySummary} · Remote Control ${rcSummary}`
+    : `全域開關狀態：429 備援 ${foSummary} · 失敗重試 ${retrySummary} · 手機遙控 ${rcSummary}`
+
   const activeSession = h.session || 'claude'
   const claudeMark = activeSession === 'claude' ? '●' : '○'
+  const claudeDesc = activeSession === 'claude'
+    ? (en ? 'Anthropic Claude  ← active' : 'Anthropic Claude（預設主線） ← 目前使用中')
+    : (en ? 'Anthropic Claude (switching back rebuilds prompt cache)' : '切回 Anthropic Claude（長對話會重建一次快取）')
+
   const lines: string[] = [
     head,
-    lang === 'en'
-      ? `Subagent (haiku) & 429 Failover -> ${failoverProvider} (${failoverModel})`
-      : `子代理（haiku）與 429 備援 → ${failoverProvider} (${failoverModel})`,
+    aliasLine,
+    switchLine,
     '',
-    lang === 'en' ? 'Available routes:' : '可用切換指令：',
-    lang === 'en'
-      ? `  ${claudeMark} /provider claude   Switch back to Claude (rebuilds prompt cache on long chats)`
-      : `  ${claudeMark} /provider claude   這個對話切回 Claude（長對話會重建一次快取，很耗額度）`,
+    en ? 'Switch this session:' : '切換這個對話的模型：',
+    `  ${claudeMark} /provider ${'claude'.padEnd(8)} ${claudeDesc}`,
   ]
+
   for (const [k, m] of Object.entries(providers)) {
-    const mark = activeSession === k ? '●' : '○'
-    const tag = k === failoverProvider ? (lang === 'en' ? ' [failover]' : ' [預設 429 備援]') : ''
+    const isCurrent = activeSession === k
+    const mark = isCurrent ? '●' : '○'
+    const badges: string[] = []
+    for (const [slot, target] of Object.entries(aliases)) {
+      if (target === k) badges.push(en ? `${slot} alias` : `${slot} 別名`)
+    }
+    if (foOn) {
+      const idx = chain.indexOf(k)
+      if (idx === 0 && chain.length === 1) badges.push(en ? '429 failover' : '429 備援')
+      else if (idx >= 0) badges.push(en ? `429 failover #${idx + 1}` : `429 備援 #${idx + 1}`)
+    }
+    const badgeText = badges.length > 0 ? ` [${badges.join(' · ')}]` : ''
     const st = h.stats?.[k]
-    const stText = st && st.status > 0 ? ` (${st.status} · ${st.ms}ms)` : ''
-    lines.push(
-      lang === 'en'
-        ? `  ${mark} /provider ${k.padEnd(8)} Pin this session to ${m}${tag}${stText}`
-        : `  ${mark} /provider ${k.padEnd(8)} 這個對話固定改用 ${m}${tag}${stText}`,
-    )
+    const stText = st && st.status > 0 ? ` (${st.status} · ${fmtLatency(st.ms)})` : ''
+    const activeSuffix = isCurrent ? (en ? '  ← pinned' : '  ← 目前固定') : ''
+    lines.push(`  ${mark} /provider ${k.padEnd(8)} ${m}${badgeText}${stText}${activeSuffix}`)
   }
+
   lines.push(
-    lang === 'en'
-      ? '  · /provider panel    Toggle interactive control panel above prompt'
-      : '  · /provider panel    開關輸入框上方的互動控制面板（亦支援 /provider ping 測速）',
+    '',
+    en ? 'Controls & settings:' : '面板與快速設定：',
+    en
+      ? '  · /provider panel                      Toggle interactive panel above prompt (hotkeys 1-9 / p / f / t / x)'
+      : '  · /provider panel                      開關上方互動面板（熱鍵 1-9 切換 · p 測速 · f 備援 · t 重試 · x 遙控）',
+    en
+      ? '  · /provider ping                       Test live latency across all providers'
+      : '  · /provider ping                       即時測試所有供應商的回應延遲',
+    en
+      ? '  · /provider alias [haiku <name|claude>] View or point a Claude model alias (e.g. /provider alias haiku glm)'
+      : '  · /provider alias [haiku <name|claude>] 查看或設定別名分流（例：/provider alias haiku glm）',
+    en
+      ? '  · /provider failover <on|off|a,b>      Toggle 429 failover or set the failover chain'
+      : '  · /provider failover <on|off|a,b>      開關 429 備援或設定接手順序（例：/provider failover gemini,glm）',
+    en
+      ? '  · /provider retry <on|off>             Toggle automatic provider retries'
+      : '  · /provider retry <on|off>             開關供應商失敗自動重試',
+    en
+      ? '  · /provider rc <on|off>                Toggle Remote Control HTTPS proxy mode (applies to new sessions)'
+      : '  · /provider rc <on|off>                開關手機 Remote Control 代理模式（新對話生效）',
+    en
+      ? `  · subagent_type: "model-relay:<name>"  Spawn a full Agent on a provider (${Object.keys(providers).map((k) => `model-relay:${k}`).join(', ')})`
+      : `  · subagent_type: "model-relay:<name>"  派出等同預設 Agent 的子代理並走該供應商（${Object.keys(providers).map((k) => `model-relay:${k}`).join('、')}）`,
   )
   return lines.join('\n')
+}
+
+export interface ProviderAgentSpec {
+  name: string
+  description: string
+  prompt: string
+  model: string
+}
+
+const DEFAULT_AGENT_PROMPT =
+  "You are an agent for Claude Code, Anthropic's official CLI for Claude. Given the user's message, use the available tools to complete the task fully and report your findings and changes clearly and concisely."
+
+// Builds one `$.agent.register` spec per configured provider. `tools` is omitted so the subagent inherits every tool
+// the parent has (identical to the built-in general-purpose Agent), while `model` is set to the provider's model ID.
+export function providerAgentSpecs(cfg: RelayCfg, h: Health | null = null): ProviderAgentSpec[] {
+  const active = h?.providers && Object.keys(h.providers).length > 0 ? h.providers : cfg.providers
+  return Object.entries(active).map(([name, model]) => ({
+    name,
+    description: `General-purpose agent routed to ${name} (${model}) via model-relay. Same full toolset as the default Agent tool.`,
+    prompt: DEFAULT_AGENT_PROMPT,
+    model,
+  }))
+}
+
+// When the parent calls `Agent({ subagent_type: "model-relay:gemini", model: "sonnet" })`, the explicit `model`
+// argument on `Agent` would otherwise override the agent definition's `model: "gemini-4-argon"`. `on('agent.spawn')`
+// uses this to lock `model-relay:<name>` back to its provider model.
+export function providerModelForSubagent(subagentType: string, cfg: RelayCfg, h: Health | null = null): string | null {
+  const m = /^model-relay:([a-z0-9_-]+)$/i.exec((subagentType || '').trim())
+  if (!m) return null
+  const key = m[1]!.toLowerCase()
+  const active = h?.providers && Object.keys(h.providers).length > 0 ? h.providers : cfg.providers
+  return active[key] ?? null
 }

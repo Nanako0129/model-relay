@@ -2,7 +2,7 @@
   "port": 8950,
   "failover": {
     "enabled": true,
-    "provider": "glm",
+    "chain": ["glm"],
     "cooldownMs": 600000
   },
   "providers": {

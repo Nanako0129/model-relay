@@ -6,7 +6,14 @@ const http = require('http')
 const https = require('https')
 const fs = require('fs')
 const path = require('path')
+const net = require('net')
+const tls = require('tls')
 const L = require('./logic')
+const PKI = require('./pki')
+
+// This process is itself the HTTPS proxy: it must never send its own traffic, or its children's, through a proxy
+// setting inherited from Claude Code, which would loop back into it.
+for (const k of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) delete process.env[k]
 
 const dir = process.argv[2] || process.env.CLAUDE_CONFIG_DIR || path.join(process.env.USERPROFILE || process.env.HOME || '', '.claude')
 
@@ -27,11 +34,16 @@ function resolveStatePath() {
 const LOG_FILE = path.join(dir, 'custom-agent-router.log')
 const REQLOG = path.join(dir, 'custom-agent-requests.log')
 
+// The file is re-read on every request so edits apply at once. A read that fails (an editor mid-save, a typo) keeps
+// the last good config instead of failing requests; "doctor" is what tells a person the file is broken.
+let lastGoodCfg = null
 const readCfg = () => {
   try {
-    return L.parseCfg(JSON.parse(fs.readFileSync(resolveCfgPath(), 'utf8')))
+    const parsed = L.parseCfg(JSON.parse(fs.readFileSync(resolveCfgPath(), 'utf8')))
+    if (parsed) lastGoodCfg = parsed
+    return parsed || lastGoodCfg
   } catch {
-    return null
+    return lastGoodCfg
   }
 }
 
@@ -170,13 +182,15 @@ function pingOne(provider) {
   })
 }
 
-function toProvider(provider, req, res, body, rewrite, sid, attempt = 0) {
+// tried: providers this request already gave up on, so a fallback never loops back to one of them
+function toProvider(provider, req, res, body, rewrite, sid, attempt = 0, tried = []) {
   const t0 = Date.now()
   let out = body
   if (body.length) {
     try {
       out = L.rewriteBody(body, {
         model: rewrite ? provider.model : null,
+        defaultModel: provider.model,
         stripCacheControl: provider.stripCacheControl,
         stripToolSearch: provider.stripToolSearch,
       })
@@ -185,15 +199,16 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0) {
     }
   }
   const headers = buildAuthHeaders(provider, req.headers)
-  const cfgNow = readCfg()
-  const retryCfg = cfgNow ? cfgNow.retry : null
+  // Per-provider switch: retryCfg === null means this provider never retries
+  const retryCfg = provider.retryCfg !== undefined ? provider.retryCfg : null
 
   // Retries exhausted on this provider: hand the ORIGINAL body to the failover provider when one exists
   const giveUp = (status, text, upstreamHeaders) => {
-    const fo = cfgNow && cfgNow.failoverEnabled !== false ? cfgNow.providers[cfgNow.failoverProvider] : null
-    if (retryCfg && retryCfg.failover && fo && fo.name !== provider.name) {
-      log(`provider "${provider.name}" kept failing (last ${status}); failing over to "${fo.name}" for this request`)
-      return toProvider(fo, req, res, body, true, sid, 0)
+    const cfgNow = readCfg()
+    const next = retryCfg && retryCfg.failover && cfgNow && cfgNow.failoverEnabled ? L.nextFallback(cfgNow, provider.name, tried) : null
+    if (next) {
+      log(`provider "${provider.name}" kept failing (last ${status}); falling back to "${next.name}" for this request`)
+      return toProvider(next, req, res, body, true, sid, 0, [...tried, provider.name])
     }
     if (text !== null) {
       res.writeHead(status, upstreamHeaders || { 'content-type': 'application/json' })
@@ -205,10 +220,11 @@ function toProvider(provider, req, res, body, rewrite, sid, attempt = 0) {
   const maybeRetry = (status, upstreamHeaders, onErrorText) => {
     providerStats[provider.name] = { status, ms: Date.now() - t0, at: Date.now() }
     if (!retryCfg) return false
+    if (res.writableEnded || res.destroyed) return false // the client gave up; stop retrying for it
     const wait = L.retryWaitMs(status, upstreamHeaders, attempt, retryCfg)
     if (wait === null) return false
-    log(`provider "${provider.name}" answered ${status}; retry ${attempt + 1}/${retryCfg.attempts} in ${wait}ms`)
-    setTimeout(() => toProvider(provider, req, res, body, rewrite, sid, attempt + 1), wait)
+    log(`provider "${provider.name}" answered ${status}; retry ${attempt + 1}${retryCfg.attempts ? '/' + retryCfg.attempts : ' (unlimited)'} in ${wait}ms`)
+    setTimeout(() => toProvider(provider, req, res, body, rewrite, sid, attempt + 1, tried), wait)
     return true
   }
 
@@ -283,11 +299,14 @@ function control(req, res, body) {
       failoverSince: state.failoverSince,
       nextClaudeTry: state.nextClaudeTry,
       failoverProvider: cfg ? cfg.failoverProvider : 'glm',
+      failoverChain: cfg ? cfg.failoverChain : [],
+      aliases: cfg ? L.detectAliases(cfg) : {},
+      config: cfg ? { failoverEnabled: cfg.failoverEnabled, retryEnabled: cfg.retry.enabled, proxyEnabled: cfg.proxy.enabled } : null,
       providers,
       stats: providerStats,
       sessionsOnCustom: Object.keys(state.sticky || {}).length,
-      sessionsOnGlm: Object.keys(state.onGlm || {}).length,
       session: L.getSessionProvider(state, cfg, sid),
+      proxy: { enabled: Boolean(cfg && cfg.proxy.enabled), certificate: Boolean(mitmServer()), ...proxyStats },
     })
   }
   if (u.pathname === '/__session' && req.method === 'POST') {
@@ -324,12 +343,36 @@ function control(req, res, body) {
   return apiError(res, 404, 'unknown control path')
 }
 
-const server = http.createServer((req, res) => {
+// Streams a request to Anthropic untouched. Used inside the opened-up tunnel for everything that is not a model call.
+function passthrough(cfg, req, res) {
+  const u = new URL(cfg.claudeUrl)
+  const lib = u.protocol === 'http:' ? http : https
+  const headers = { ...req.headers, host: u.host }
+  for (const h of ['connection', 'proxy-connection', 'keep-alive', 'upgrade']) delete headers[h]
+  const up = lib.request(
+    { hostname: u.hostname, port: u.port || (u.protocol === 'http:' ? 80 : 443), path: L.upstreamPath(cfg.claudeUrl, req.url), method: req.method, headers },
+    (ur) => {
+      res.writeHead(ur.statusCode, ur.headers)
+      ur.pipe(res)
+    },
+  )
+  up.on('error', (e) => apiError(res, 502, `Anthropic unreachable: ${e.message}`))
+  res.on('close', () => up.destroy())
+  req.pipe(up)
+}
+
+// tunneled: the request arrived through a CONNECT tunnel opened for api.anthropic.com
+function dispatch(req, res, tunneled) {
+  if (tunneled) {
+    const cfg = readCfg()
+    if (!cfg) return apiError(res, 500, 'model-relay.json / custom-agent.json is missing or invalid')
+    if (!L.isRoutedRequest(req.method, req.url)) return passthrough(cfg, req, res)
+  }
   const chunks = []
   req.on('data', (c) => chunks.push(c))
   req.on('end', () => {
     const body = Buffer.concat(chunks)
-    if (req.url.startsWith('/__')) return control(req, res, body)
+    if (!tunneled && req.url.startsWith('/__')) return control(req, res, body)
     const cfg = readCfg()
     if (!cfg) return apiError(res, 500, 'model-relay.json / custom-agent.json is missing or invalid')
     const sid = String(req.headers['x-claude-code-session-id'] || '')
@@ -343,7 +386,7 @@ const server = http.createServer((req, res) => {
       } catch {}
     }
     const route = L.decide(state, cfg, model, sid, Date.now())
-    logReq({ sid: short(sid), model, nMsgs, route })
+    logReq({ sid: short(sid), model, nMsgs, route, ...(tunneled ? { via: 'proxy' } : {}) })
     const parsed = L.parseRoute(route, cfg)
     if (parsed.kind === 'provider' && parsed.provider) {
       if (parsed.rewrite && state.failoverSince && L.getSessionProvider(state, cfg, sid) === 'claude') {
@@ -353,6 +396,103 @@ const server = http.createServer((req, res) => {
     }
     return toClaude(cfg, req, res, body, parsed.trial, sid)
   })
+}
+
+const server = http.createServer((req, res) => dispatch(req, res, false))
+
+// ---------- HTTPS proxy mode ----------
+// Claude Code keeps api.anthropic.com as its address (Remote Control requires it) and uses this router as its
+// HTTPS proxy. A CONNECT for api.anthropic.com:443 is answered with our own certificate (see pki.js) and the
+// decrypted requests join the same routing as before; every other CONNECT is a blind byte tunnel.
+
+const proxyStats = { mitm: 0, tunnel: 0, lastMitmAt: 0 }
+let lastTlsError = 0
+let mitmCache = null // { server, cert, checkedAt }
+
+function mitmServer() {
+  const now = Date.now()
+  if (mitmCache && now - mitmCache.checkedAt < 10000) return mitmCache.server
+  const leaf = PKI.loadLeaf(dir)
+  if (!leaf) {
+    if (mitmCache && mitmCache.server) log('proxy: certificate missing or expired; api.anthropic.com is tunnelled unrouted until it is renewed')
+    mitmCache = { server: null, cert: '', checkedAt: now }
+    return null
+  }
+  const cert = leaf.cert.toString('utf8')
+  if (mitmCache && mitmCache.server && mitmCache.cert === cert) {
+    mitmCache.checkedAt = now
+    return mitmCache.server
+  }
+  const srv = https.createServer({ key: leaf.key, cert: leaf.cert, ALPNProtocols: ['http/1.1'] }, (req, res) => dispatch(req, res, true))
+  srv.on('upgrade', tunnelUpgrade)
+  srv.on('tlsClientError', (e) => {
+    if (Date.now() - lastTlsError < 60000) return
+    lastTlsError = Date.now()
+    log(`proxy: client refused our certificate (${e.message}); is NODE_EXTRA_CA_CERTS pointing at ${PKI.paths(dir).ca}?`)
+  })
+  srv.on('clientError', (e, sock) => sock.destroy())
+  log(`proxy: serving api.anthropic.com with a certificate valid until ${new Date(leaf.expires).toISOString()}`)
+  mitmCache = { server: srv, cert, checkedAt: now }
+  return srv
+}
+
+// WebSocket and other upgrades are not ours to inspect: forward the raw request and pipe both ways
+function tunnelUpgrade(req, socket, head) {
+  const cfg = readCfg()
+  const host = String(req.headers.host || '').replace(/:\d+$/, '').toLowerCase()
+  if (!cfg || host !== L.PROXY_MITM_HOST) return socket.destroy()
+  const u = new URL(cfg.claudeUrl)
+  const ready = () => {
+    const lines = [`${req.method} ${req.url} HTTP/1.1`]
+    for (let i = 0; i < req.rawHeaders.length; i += 2) lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`)
+    up.write(lines.join('\r\n') + '\r\n\r\n')
+    if (head && head.length) up.write(head)
+    up.pipe(socket)
+    socket.pipe(up)
+  }
+  const up = u.protocol === 'http:'
+    ? net.connect({ host: u.hostname, port: Number(u.port) || 80 }, ready)
+    : tls.connect({ host: u.hostname, port: Number(u.port) || 443, servername: u.hostname }, ready)
+  const stop = () => {
+    up.destroy()
+    socket.destroy()
+  }
+  up.on('error', stop)
+  socket.on('error', stop)
+  up.on('close', stop)
+  socket.on('close', stop)
+}
+
+server.on('connect', (req, client, head) => {
+  const cfg = readCfg()
+  const target = L.parseConnectTarget(req.url)
+  const srv = cfg ? mitmServer() : null
+  const action = L.proxyAction(cfg ? cfg.proxy : { enabled: true }, target, Boolean(srv))
+  client.on('error', () => client.destroy())
+  if (action === 'refuse') return client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+  if (action === 'mitm') {
+    proxyStats.mitm += 1
+    proxyStats.lastMitmAt = Date.now()
+    client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+    if (head && head.length) client.unshift(head)
+    return srv.emit('connection', client)
+  }
+  proxyStats.tunnel += 1
+  let open = false
+  const up = net.connect({ host: target.host, port: target.port }, () => {
+    open = true
+    client.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+    if (head && head.length) up.write(head)
+    up.pipe(client)
+    client.pipe(up)
+  })
+  const stop = () => {
+    up.destroy()
+    client.destroy()
+  }
+  up.on('error', () => (open ? stop() : client.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n')))
+  up.on('close', stop)
+  client.on('close', stop)
 })
 
 const cfg0 = readCfg()

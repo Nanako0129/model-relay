@@ -7,11 +7,15 @@ import {
   sessionArgv,
   parseCfg,
   parseHealth,
+  providerAgentSpecs,
+  providerModelForSubagent,
   providerReport,
   routerScript,
   routerUrl,
+  setupScript,
   startArgv,
   statusText,
+  toggleArgv,
 } from './logic'
 import { fit } from './panel'
 
@@ -67,9 +71,46 @@ test('health, panel data, and status texts (zh and en)', () => {
   assert(parseHealth('{"ok":true,"mode":"glm"}')!.session === 'claude', 'old router answer reads as claude')
   assert(statusText(null, 'glm', true).includes('直連'), 'router down, direct')
   const rep = providerReport(h, 'glm', 5)
-  assert(rep.includes('10 分鐘後') && rep.includes('● /provider claude') && rep.includes('○ /provider glm') && rep.includes('200 · 1200ms'), 'structured provider report with latency')
+  assert(rep.includes('10 分鐘後') && rep.includes('● /provider claude') && rep.includes('○ /provider glm') && rep.includes('200 · 1.2s') && rep.includes('haiku → glm'), 'structured provider report with latency and alias')
   const cfg = parseCfg(base)!
+  assert(cfg.aliases.haiku === 'glm', 'default glm alias detected')
   const pd = buildPanelData(h, cfg, false, 'zh', 5)
-  assert(pd.online && pd.sessionsOnCustom === 3 && pd.stats.glm?.status === 200, 'panel snapshot built')
+  assert(pd.online && pd.sessionsOnCustom === 3 && pd.stats.glm?.status === 200 && pd.aliases.haiku === 'glm', 'panel snapshot built')
   assert(fit('1234567890', 6) === '12345…', 'fit truncates long text')
+})
+
+test('the failover chain leads the panel, and the router reports its switches', () => {
+  const cfg = parseCfg({
+    providers: { glm: { token: 't' }, deepseek: { token: 't' } },
+    failover: { chain: ['ghost', 'deepseek', 'glm'] },
+  })!
+  assert(cfg.failoverProvider === 'deepseek', 'first usable link of the chain leads')
+
+  const old = parseHealth('{"ok":true,"session":"claude"}')!
+  assert(old.switches === undefined && buildPanelData(old, cfg, false, 'zh', 0).switches === null, 'an older router shows no switches')
+
+  const h = parseHealth('{"ok":true,"session":"claude","failoverChain":["Deepseek","glm"],"config":{"failoverEnabled":true,"retryEnabled":false,"proxyEnabled":true},"proxy":{"enabled":true,"certificate":true}}')!
+  const pd = buildPanelData(h, cfg, false, 'zh', 0)
+  assert(pd.failoverChain.join() === 'deepseek,glm', 'chain from the router, lower-cased')
+  assert(pd.switches?.failover === true && pd.switches.retry === false && pd.switches.proxy === true && pd.switches.proxyReady === true, 'switches as the router reports them')
+  assert(parseHealth('{"ok":true,"config":{"failoverEnabled":true}}')!.switches === undefined, 'a partial report is ignored')
+})
+
+test('switches are changed through the setup CLI', () => {
+  const cfg = parseCfg({ ...base, nodePath: 'node' })!
+  assert(setupScript('C:/mods/custom-agent/.claude-plugin') === 'C:/mods/custom-agent/tools/setup.mjs', 'manifest dir with forward slashes')
+  const script = setupScript('C:\\mods\\custom-agent\\.claude-plugin')
+  assert(script === 'C:/mods/custom-agent/tools/setup.mjs', 'script path from the plugin root')
+  assert(toggleArgv(cfg, script, 'failover', false).join(' ') === `node ${script} set failover.enabled off`, 'failover')
+  assert(toggleArgv(cfg, script, 'retry', true).join(' ') === `node ${script} set retry.enabled on`, 'retry')
+  assert(toggleArgv(cfg, script, 'proxy', true).join(' ') === `node ${script} proxy enable --go`, 'proxy on')
+  assert(toggleArgv(cfg, script, 'proxy', false).join(' ') === `node ${script} proxy disable --go`, 'proxy off')
+
+  const multi = parseCfg({
+    providers: { glm: { token: 't' }, gemini: { token: 'g' } },
+  })!
+  const specs = providerAgentSpecs(multi)
+  assert(specs.length === 2 && specs[0]?.name === 'glm' && specs[0]?.model === 'glm-5.3[1m]' && specs[1]?.name === 'gemini' && specs[1]?.model === 'gemini-4-argon', 'providerAgentSpecs builds one spec per provider')
+  assert(providerModelForSubagent('model-relay:gemini', multi) === 'gemini-4-argon', 'locks model-relay:gemini to gemini-4-argon')
+  assert(providerModelForSubagent('Explore', multi) === null, 'leaves other subagent types untouched')
 })

@@ -6,6 +6,37 @@
 
 ## [未發布]
 
+## [0.6.0] - 2026-10-20
+
+支援保留轉發站的手機 Remote Control（`proxy.enabled` 搭配只限 `api.anthropic.com` 的本機 CA）、一行指令設定 `haiku`／`sonnet`／`opus` 模型別名分流（`setup.mjs alias` 與 `/provider alias`），並動態註冊可直接派工的供應商子代理（`subagent_type: "model-relay:<name>"`），免建 `.claude/agents/*.md` 也免重開對話。`/provider` 互動面板同步新增 429 備援（`failover.chain`）、失敗重試（`retry.enabled`）與手機遙控三列開關（熱鍵 `f`／`t`／`x`）。
+
+**升級：** 拉取最新版本或執行 `claude plugin update model-relay@model-relay`。若想整理舊版設定鍵，可執行 `node tools/setup.mjs migrate --go`。
+
+### 新增
+
+- **轉發站留在路徑上也能用 Remote Control（HTTPS 代理模式）：** Claude Code 維持 `api.anthropic.com` 當位址（Remote Control 的要求），改把轉發站當成它的 `HTTPS_PROXY`。轉發站以自己的憑證代答 `api.anthropic.com`，模型請求照舊分流（供應商、429 黏著備援、重試）；token 更新、Remote Control 流量與 WebSocket 升級原封不動交給 Anthropic，其他網站則是單純的位元組通道。選用功能：預設關閉，沒用 Remote Control 的人，轉發站不會變成開放代理。設定：`proxy.enabled`。
+- **限定網域的本機憑證授權單位：** 這個 CA 只能為 `api.anthropic.com` 背書，簽完唯一的那張葉憑證後私鑰立即丟棄，而且只有帶 `NODE_EXTRA_CA_CERTS` 的程序才會信任它。沒有可用憑證時，轉發站會把 `api.anthropic.com` 原封不動轉送，Claude Code 照常運作。
+- **`setup.mjs proxy` 與 `setup.mjs rc`：** `proxy status|enable|disable|renew`（加 `--go` 才會套用）在 API 位址模式與代理模式之間切換 `settings.json`，保留 `settings.json.relay-backup` 備份，且不會碰不屬於轉發站的設定；`rc` 會在需要時先啟動轉發站，再執行 `claude remote-control`。
+- **備援名單：** `failover.chain` 依序列出接手的供應商。Claude 額度用完時由第一個回答；開啟 `retry.failover` 後，持續失敗的供應商會把請求交給下一個，不會回頭找已經試過的。供應商可以用 `providers.<name>.fallback` 覆寫（`false` 代表不交給任何人，或自己的清單）。
+- **重試總開關：** `retry.enabled` 設為 `false` 即全面停止重試，其他重試設定會保留，之後再開即可。
+- **`/provider` 面板上的開關：** 三列開關可開關 429 備援、重試與 Remote Control（熱鍵 `f`、`t`、`x`）。Remote Control 會改寫 `settings.json`，所以先確認再執行；面板是透過 `setup.mjs` 同一組 `set` 與 `proxy` 指令修改檔案。
+- **`setup.mjs` 的設定指令：** `set` 驗證後修改單一開關或清單，`providers` 逐一列出路由、備援與重試，`remove` 把供應商從檔案與所有備援名單中移除，`migrate` 把舊格式檔案整理成目前的格式。每次修改都會留一份 `.relay-backup` 備份、token 一律不會印出，轉發站在下一個請求就會讀到結果。
+- **一鍵模型別名管理（`setup.mjs alias` 與 `/provider alias`）：** 可在單一指令查看或將 `haiku`、`sonnet`、`opus` 與 `subagent`（`CLAUDE_CODE_SUBAGENT_MODEL`）指向指定供應商或還原回 Claude，自動同步更新 `~/.claude/settings.json`（`ANTHROPIC_DEFAULT_*_MODEL`）與 `~/.claude/model-relay.json`（`matchModels`）。`/provider` 與互動面板現在將「別名分流」與「429 備援」分開揭露，並支援直接在對話框輸入 `/provider alias|failover|retry|rc`。
+- **動態註冊 `model-relay:<provider>` 子代理類型（`$.agent.register` 與 `agent.spawn`）：** 針對 Claude Code `Agent` 工具 `model` 欄位只接受 `"sonnet"|"opus"|"haiku"|"fable"` 的限制，外掛現在會自動為每個供應商動態註冊具備完整父層工具的 `model-relay:<name>`（如 `model-relay:glm`、`model-relay:gemini`），並在 `on('agent.spawn')` 鎖定該供應商的模型 ID——無須建立 `.claude/agents/*.md` 或重開對話。
+
+### 變更
+
+- **`doctor` 認得代理模式：** 代理模式開啟時，`doctor --fix` 不會再把 `ANTHROPIC_BASE_URL` 加回去，`/__health` 也會回報代理狀態與連線數。
+- **設定檔格式更乾淨：** `failover` 底下放 `enabled`、`chain` 與 `cooldownMs`，供應商只放在 `providers`。舊的頂層 `baseUrl`、`token`、`model`、`gemini`、`failoverEnabled`、`probeEveryMin` 與 `failoverProvider` 仍可使用，讀取時等同已整理過；`migrate --go` 會在行為不變的前提下改寫檔案。
+- **`doctor` 會檢查設定：** 提醒舊版格式、備援名單裡不存在的供應商，以及被別的供應商的 `matchModels` 先攔走的模型名稱，備援那一行也會顯示名單與冷卻時間。
+- **`/__health` 回報開關狀態：** `failoverChain` 與 `config` 讓面板顯示轉發站實際的狀態，而不是猜測。
+
+### 修正
+
+- **`failover.cooldownMs` 沒有作用：** 文件寫的設定沒有生效，因為轉發站讀的是 `probeEveryMin`。現在 `failover.cooldownMs` 會決定新對話離開 Claude 多久，最小一分鐘。
+- **存到一半的設定檔不再讓請求失敗：** 檔案暫時讀不到時，轉發站會沿用上一份正常的設定；`setup.mjs` 的指令也改成一次寫完整個檔案。
+- **經由 `matchModels` 攔截的 `claude-*` 請求會正確改寫模型名稱：** 當帶有 `claude-*`（例如 Claude Code 內部寫死的 `claude-haiku-4-5-20251001`）的請求符合某個供應商的 `matchModels` 時，轉發站現在會把送往上游的 `model` 欄位改寫為該供應商的目標模型，不再原樣送出 `claude-*`。
+
 ## [0.5.0] - 2026-10-18
 
 供應商回 429 或 5xx 不再讓你的回合中斷：轉發站在**同一個供應商**上以指數退避自動重試，`Retry-After` 要求更久時以 `retry.maxDelayMs` 為間隔持續輪詢——Claude Code 完全看不到中間的失敗。跨供應商備援改為選配開關。
@@ -14,9 +45,10 @@
 
 ### 新增
 
-- **同一供應商透明重試與退避：** 供應商失敗回應（429、500、502、503、504、529）在原供應商上以 `retry.attempts` 次數、`retry.delayMs` × `retry.backoff` 的間隔退避重試，單次等待受 `retry.maxDelayMs` 上限。設定：`retry`。
+- **同一供應商透明重試與退避：** 供應商失敗回應（429、500、502、503、504、529）在原供應商上以 `retry.attempts` 次數、`retry.delayMs` × `retry.backoff` 的間隔退避重試，單次等待受 `retry.maxDelayMs` 上限。`retry.attempts: 0` 為無限重試（打到通或客戶端斷線為止）。設定：`retry`。
 - **`Retry-After` 感知：** 供應商要求等待超過 `retry.maxDelayMs` 時，改以該上限為間隔持續輪詢，不提前放棄。設定：`retry.maxDelayMs`。
 - **選配跨供應商備援：** 開啟 `retry.failover: true` 後，重試用盡時把原始（未改寫的）請求轉送 `failover.provider`，讓該輪在備援模型上完成，而不是回傳錯誤。設定：`retry.failover`。
+- **每供應商重試開關：** `providers.<name>.retry` 可對單一供應商關閉重試（`false`）、跟隨全域設定（`true`，預設），或傳部分物件（如 `{ "attempts": 5 }`）只覆寫個別欄位。設定：`providers.<name>.retry`。
 
 ## [0.4.0] - 2026-10-17
 
@@ -49,7 +81,8 @@
 
 - **舊版 `custom_agent` 子程序工具：** 移除已棄用的 `claude.exe -p` 子程序包裝程式碼，讓外掛專注於純粹、零額外負擔的 HTTP 模型轉發與對話路由。
 
-[unreleased]: https://github.com/cablate/model-relay/compare/v0.5.0...HEAD
+[unreleased]: https://github.com/cablate/model-relay/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cablate/model-relay/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cablate/model-relay/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cablate/model-relay/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cablate/model-relay/releases/tag/v0.3.0

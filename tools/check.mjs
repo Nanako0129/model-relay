@@ -14,6 +14,8 @@ function step(label, cmd, args) {
 
 step('Syntax check (router)', process.execPath, ['--check', 'router/logic.js'])
 step('Syntax check (router server)', process.execPath, ['--check', 'router/router.js'])
-step('Router unit tests', process.execPath, ['--test', 'router/logic.test.js'])
+step('Syntax check (certificates)', process.execPath, ['--check', 'router/pki.js'])
+step('Router unit tests', process.execPath, ['--test', 'router/logic.test.js', 'router/pki.test.js', 'router/failover.test.js'])
+step('Router end-to-end tests (HTTPS proxy, setup CLI)', process.execPath, ['--test', 'router/router-proxy.test.js', 'router/setup-proxy.test.js', 'router/setup-config.test.js'])
 step('Bilingual docs check', process.execPath, ['tools/docs.mjs', 'check'])
 console.log('All checks passed.')

@@ -12,6 +12,8 @@ export type PanelActions = {
   askClaude: (ask: boolean) => void
   ping: () => void
   probe: () => void
+  toggle: (which: 'failover' | 'retry' | 'proxy', on: boolean) => void
+  askProxy: (ask: boolean) => void
   close: () => void
 }
 
@@ -51,6 +53,13 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
 
   const foModel = v.providers[v.failoverProvider] ?? v.failoverProvider
   const mins = v.failoverSince ? Math.max(0, Math.round((v.nextClaudeTry - v.now) / 60000)) : 0
+  const aliases = v.aliases ?? {}
+  const aliasPairs = Object.entries(aliases)
+    .filter(([, p]) => v.providers[p])
+    .map(([slot, p]) => `${slot} → ${p} (${v.providers[p]})`)
+  const aliasText = aliasPairs.length > 0
+    ? aliasPairs.join(en ? ', ' : '、')
+    : (en ? 'none (all tiers on main)' : '無（全走主線）')
 
   const subtitle = !v.online
     ? (en
@@ -61,8 +70,8 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
           ? `Claude 429 limit active · Failover → ${v.failoverProvider} (${foModel}) · Retry in ~${mins}m`
           : `Claude 429 額度冷卻中・自動備援 → ${v.failoverProvider} (${foModel})・約 ${mins} 分鐘後重試`)
       : (en
-          ? `Subagent (haiku) & 429 Failover → ${v.failoverProvider} (${foModel}) · Pinned chats: ${v.sessionsOnCustom}`
-          : `子代理 (haiku) 與 429 備援 → ${v.failoverProvider} (${foModel})・固定中對話：${v.sessionsOnCustom}`)
+          ? `Aliases: ${aliasText} · Pinned chats: ${v.sessionsOnCustom}`
+          : `別名分流：${aliasText}・固定中對話：${v.sessionsOnCustom}`)
 
   const isClaudeActive = v.session === 'claude'
   const claudeRow = (
@@ -106,6 +115,78 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
   )
 
   const providerEntries = Object.entries(v.providers)
+
+  // One row per switch: what it is, whether it is on, and what flipping it does. failover and retry apply on the
+  // router's next request; the proxy rewrites settings.json, so it asks first and only reaches new sessions.
+  const sw = v.switches
+  const chainText = v.failoverChain.join(' → ')
+  const switchRow = (
+    id: 'failover' | 'retry' | 'proxy',
+    name: string,
+    on: boolean,
+    detail: string,
+    button: ReturnType<typeof Button> | ReturnType<typeof Button>[] | null,
+  ) => (
+    <Box key={`switch:${id}`}>
+      <Box flexGrow={1}>
+        <Text>
+          <Text color={on ? 'green' : 'gray'} bold>{on ? '● ' : '○ '}</Text>
+          <Text bold>{name}</Text>{' '}
+          <Text dimColor>{fit(`· ${detail}`, Math.max(20, inner - 30))}</Text>
+        </Text>
+      </Box>
+      {button}
+    </Box>
+  )
+  const flipLabel = (on: boolean, key: string) => (on ? (en ? `Turn off [${key}]` : `關閉 [${key}]`) : (en ? `Turn on [${key}]` : `開啟 [${key}]`))
+  const proxyButton = !sw
+    ? null
+    : v.confirmingProxy
+      ? [
+          <Button
+            key="confirm-proxy"
+            label={sw.proxy
+              ? (en ? 'Confirm (running remote sessions drop)' : '確定關閉（執行中的遙控對話會斷線）')
+              : (en ? 'Confirm (edits settings.json)' : '確定開啟（會改 settings.json）')}
+            variant="primary"
+            onPress={() => act.toggle('proxy', !sw.proxy)}
+          />,
+          <Button key="cancel-proxy" label={en ? 'Cancel' : '取消'} onPress={() => act.askProxy(false)} />,
+        ]
+      : <Button key="btn:proxy" label={flipLabel(sw.proxy, 'x')} hotkey="x" onPress={() => act.askProxy(true)} />
+  const switchRows = sw
+    ? (
+      <Box flexDirection="column" marginTop={1}>
+        {switchRow(
+          'failover',
+          en ? '429 failover' : '429 備援',
+          sw.failover,
+          sw.failover
+            ? (en ? `on (${chainText})` : `開啟（${chainText}）`)
+            : (en ? 'off (429 returns error)' : '關閉（額度用完直接回報）'),
+          <Button key="btn:failover" label={flipLabel(sw.failover, 'f')} hotkey="f" onPress={() => act.toggle('failover', !sw.failover)} />,
+        )}
+        {switchRow(
+          'retry',
+          en ? 'Retry' : '失敗重試',
+          sw.retry,
+          sw.retry
+            ? (en ? 'on (backoff on 429/5xx)' : '開啟（429/5xx 自動退避重試）')
+            : (en ? 'off (fail immediately)' : '關閉（出錯立即回報）'),
+          <Button key="btn:retry" label={flipLabel(sw.retry, 't')} hotkey="t" onPress={() => act.toggle('retry', !sw.retry)} />,
+        )}
+        {switchRow(
+          'proxy',
+          en ? 'Remote Control' : '手機遙控',
+          sw.proxy,
+          sw.proxy
+            ? (en ? 'on (HTTPS proxy · new sessions)' : '開啟（HTTPS 代理・新對話生效）')
+            : (en ? 'off (base-URL mode)' : '關閉（一般 API 位址模式）'),
+          proxyButton,
+        )}
+      </Box>
+    )
+    : null
 
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={ACCENT} paddingX={1}>
@@ -155,7 +236,17 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
         {claudeRow}
         {providerEntries.map(([name, model], idx) => {
           const active = v.session === name
-          const isFo = name === v.failoverProvider
+          const foOn = sw ? sw.failover : true
+          const foIdx = foOn ? v.failoverChain.indexOf(name) : -1
+          const foBadge = foIdx === 0 && v.failoverChain.length === 1
+            ? (en ? ' [429 failover]' : ' [429 備援]')
+            : foIdx >= 0
+              ? (en ? ` [429 failover #${foIdx + 1}]` : ` [429 備援 #${foIdx + 1}]`)
+              : null
+          const myAliases = Object.entries(aliases)
+            .filter(([, target]) => target === name)
+            .map(([slot]) => (en ? `${slot} alias` : `${slot} 別名`))
+          const aliasBadge = myAliases.length > 0 ? ` [${myAliases.join(' · ')}]` : null
           const st = formatStat(v.stats[name], v.lang)
           const hk = String(idx + 2)
           return (
@@ -167,7 +258,8 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
                   </Text>{' '}
                   <Text bold={active}>{name.padEnd(8)}</Text>{' '}
                   <Text color={active ? ACCENT : undefined}>{model}</Text>
-                  {isFo ? <Text color="magenta">{en ? ' [429 failover]' : ' [預設 429 備援]'}</Text> : null}
+                  {aliasBadge ? <Text color="cyan">{aliasBadge}</Text> : null}
+                  {foBadge ? <Text color="magenta">{foBadge}</Text> : null}
                   {st ? <Text color={st.color}>{` · ${st.text}`}</Text> : null}
                 </Text>
               </Box>
@@ -187,12 +279,14 @@ export function panelTree(ui: Elements, v: PanelView, act: PanelActions) {
         })}
       </Box>
 
+      {switchRows}
+
       <Box marginTop={1}>
         <Text dimColor>
           {fit(
             en
-              ? 'Tip: Click a button or press ctrl+x tab then 1-9 / p · Sticky sessions stay on backup provider to preserve prompt cache'
-              : '提示：直接點按鈕，或按 ctrl+x tab 後按數字鍵 1–9 / p 測速・固定對話不會自動切回 Claude 以免重建長快取',
+              ? 'Tip: click a button, or ctrl+x tab then 1-9 to switch · p ping · f 429 failover · t retry · x Remote Control'
+              : '提示：直接點按鈕，或按 ctrl+x tab 後按 1–9 切換・p 測速・f 429 備援・t 重試・x 手機遙控',
             inner,
           )}
         </Text>

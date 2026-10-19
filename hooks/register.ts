@@ -9,12 +9,17 @@ import {
   parseHealth,
   pingArgv,
   probeArgv,
+  providerAgentSpecs,
+  providerModelForSubagent,
   providerReport,
   routerScript,
   routerUrl,
   sessionArgv,
+  setupCliArgv,
+  setupScript,
   startArgv,
   statusText,
+  toggleArgv,
   type RelayCfg,
   type Health,
 } from './logic'
@@ -30,6 +35,17 @@ let ticking = false
 let shownStatus = ''
 let lastStart = 0
 let direct = false // this session bypasses a dead router and talks to Anthropic itself
+let registeredAgentsSig = ''
+
+async function syncProviderAgents($: EngineInterface, cfg: RelayCfg, h: Health | null = null): Promise<void> {
+  const specs = providerAgentSpecs(cfg, h)
+  const sig = JSON.stringify(specs)
+  if (sig === registeredAgentsSig) return
+  for (const spec of specs) {
+    await $.agent.register(spec).catch(() => undefined)
+  }
+  registeredAgentsSig = sig
+}
 
 async function isWindows($: EngineInterface): Promise<boolean> {
   const os = await $.env.get('OS')
@@ -91,7 +107,7 @@ async function syncPanelData($: EngineInterface, cfg: RelayCfg, h: Health | null
 
 async function setPanelNote($: EngineInterface, note: string | undefined): Promise<void> {
   try {
-    await update($, panelUi, ({ confirmingClaude: _c, note: _n, ...u }) => (note ? { ...u, confirmingClaude: false, note } : { ...u, confirmingClaude: false }))
+    await update($, panelUi, ({ confirmingClaude: _c, confirmingProxy: _p, note: _n, ...u }) => (note ? { ...u, confirmingClaude: false, note } : { ...u, confirmingClaude: false }))
   } catch {}
 }
 
@@ -106,6 +122,7 @@ async function tick($: EngineInterface): Promise<void> {
     if (!cfg) return
     const lang = await detectLang($)
     const h = await health($, cfg)
+    await syncProviderAgents($, cfg, h)
     if (h) {
       if (direct) {
         direct = false
@@ -207,8 +224,31 @@ function panelActions($: EngineInterface): PanelActions {
         await $.process.run(probeArgv(cfg, win), { timeoutMs: 5000 }).catch(() => null)
         return lang === 'en' ? 'Cooldown reset; next new session will try Claude.' : '已重置冷卻計時，下一個新對話將嘗試使用 Claude。'
       }),
+    askProxy: (ask) => {
+      void update($, panelUi, ({ note: _n, ...u }) => ({ ...u, confirmingProxy: ask }))
+    },
+    toggle: (which, on) =>
+      run(async () => {
+        const cfg = await readCfg($)
+        const lang = await detectLang($)
+        if (!cfg) return lang === 'en' ? 'Config missing.' : '設定檔不存在。'
+        const argv = toggleArgv(cfg, setupScript($.plugin.root), which, on)
+        // The proxy switch restarts the router and tests the certificate, which takes a few seconds
+        const r = await $.process.run(argv, { timeoutMs: which === 'proxy' ? 60000 : 15000 }).catch(() => null)
+        if (!r || r.exitCode !== 0) {
+          const why = (r?.stderr || r?.stdout || '').trim().split(/\r?\n/).pop() ?? ''
+          return lang === 'en' ? `Not changed: ${why || 'setup command failed'}` : `沒有變更：${why || '設定指令失敗'}`
+        }
+        if (which === 'proxy') {
+          return on
+            ? (lang === 'en' ? 'Remote Control enabled. Start a new Claude Code session to use it.' : '已開啟手機遙控；開新的 Claude Code 對話後生效。')
+            : (lang === 'en' ? 'Remote Control disabled. Sessions already running in proxy mode lose their connection.' : '已關閉手機遙控；已在代理模式執行的對話會斷線。')
+        }
+        const name = which === 'failover' ? (lang === 'en' ? '429 failover' : '429 備援') : lang === 'en' ? 'Retry' : '失敗重試'
+        return lang === 'en' ? `${name} ${on ? 'on' : 'off'} (applies to the next request).` : `${name}已${on ? '開啟' : '關閉'}（下一個請求起生效）。`
+      }),
     close: () => {
-      void update($, panelUi, (u) => ({ ...u, open: false, confirmingClaude: false }))
+      void update($, panelUi, (u) => ({ ...u, open: false, confirmingClaude: false, confirmingProxy: false }))
     },
   }
 }
@@ -217,10 +257,11 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     const cfg = await readCfg($)
     const keys = cfg ? Object.keys(cfg.providers) : ['glm', 'gemini']
+    if (cfg) await syncProviderAgents($, cfg, null)
     await $.command.register({
       name: 'provider',
-      description: '切換這個對話的模型路由或開關互動控制面板（Claude / 自訂 Provider）',
-      argumentHint: `[${[...keys, 'claude', 'panel', 'ping'].join('|')}]`,
+      description: '切換對話模型、設定 haiku 別名或開關備援面板（/provider [name|claude|panel|ping|alias|failover|retry|rc]）',
+      argumentHint: `[${[...keys, 'claude', 'panel', 'ping', 'alias', 'failover', 'retry', 'rc'].join('|')}]`,
     })
     await tick($)
     $.clock.every(10000, () => {
@@ -228,6 +269,14 @@ export const register: Register = (on) => {
     })
     return next(e)
   })
+
+  on('agent.spawn', async ($, e, next) => {
+    if (e.fork || e.resume) return next(e)
+    const cfg = await readCfg($)
+    if (!cfg) return next(e)
+    const forced = providerModelForSubagent(e.subagentType, cfg, null)
+    return forced ? next({ ...e, model: forced }) : next(e)
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'model-relay agent.spawn failed' }))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     try {
@@ -286,6 +335,37 @@ export const register: Register = (on) => {
       }
     }
 
+    const parts = arg.split(/\s+/).filter(Boolean)
+    const head = parts[0] ?? ''
+    if (head === 'alias' || head === 'failover' || head === 'retry' || head === 'rc' || head === 'proxy') {
+      const script = setupScript($.plugin.root)
+      let cliArgs: string[]
+      if (head === 'alias') {
+        cliArgs = ['alias', ...parts.slice(1)]
+      } else if (head === 'failover') {
+        const val = parts[1] ?? ''
+        const isBool = ['on', 'off', 'true', 'false', '1', '0'].includes(val)
+        cliArgs = val ? ['set', isBool ? 'failover.enabled' : 'failover.chain', val] : ['providers']
+      } else if (head === 'retry') {
+        cliArgs = parts[1] ? ['set', 'retry.enabled', parts[1]] : ['providers']
+      } else {
+        const val = parts[1] ?? 'status'
+        const sub = ['on', 'enable', 'true', '1'].includes(val)
+          ? 'enable'
+          : ['off', 'disable', 'false', '0'].includes(val)
+            ? 'disable'
+            : val
+        cliArgs = sub === 'enable' || sub === 'disable' ? ['proxy', sub, '--go'] : ['proxy', sub]
+      }
+      const r = await $.process.run(setupCliArgv(cfg, script, cliArgs), { timeoutMs: head === 'rc' || head === 'proxy' ? 60000 : 15000 }).catch(() => null)
+      const out = ((r?.stdout || '') + (r?.stderr || '')).trim()
+      const cfgNext = (await readCfg($)) ?? cfg
+      const h = await health($, cfgNext)
+      if (h) await showStatus($, statusText(h, cfgNext, false, null, lang))
+      await syncPanelData($, cfgNext, h, lang)
+      return { text: `${out ? `${out}\n\n` : ''}${providerReport(h, cfgNext, Date.now(), null, lang)}` }
+    }
+
     const h0 = await health($, cfg)
     const activeProviders = h0?.providers && Object.keys(h0.providers).length > 0 ? h0.providers : cfg.providers
     if (arg === 'claude' || activeProviders[arg]) {
@@ -297,10 +377,9 @@ export const register: Register = (on) => {
       if (h) await showStatus($, statusText(h, cfg, false, null, lang))
       await syncPanelData($, cfg, h, lang)
       const done = arg === 'claude'
-        ? (lang === 'en' ? 'Switched this session back to Claude; next request will rebuild cache.' : '這個對話切回 Claude；下一個請求會重建整段快取。')
-        : (lang === 'en' ? `Pinned this session to ${activeProviders[arg]}. ` : `這個對話之後都用 ${activeProviders[arg]}。`)
-      const otherNote = lang === 'en' ? 'Other sessions are unaffected.\n\n' : '其他對話不受影響。\n\n'
-      return { text: `${done}${otherNote}${providerReport(h, cfg, Date.now(), null, lang)}` }
+        ? (lang === 'en' ? '✓ Switched this session back to Claude (next turn rebuilds cache; other windows unaffected).\n\n' : '✓ 已將這個對話切回 Claude（下一輪會重建快取；其他視窗不受影響）。\n\n')
+        : (lang === 'en' ? `✓ Pinned this session to ${arg} (${activeProviders[arg]}; other windows unaffected).\n\n` : `✓ 已將這個對話固定改用 ${arg}（${activeProviders[arg]}；其他視窗不受影響）。\n\n`)
+      return { text: `${done}${providerReport(h, cfg, Date.now(), null, lang)}` }
     }
     if (arg !== '' && arg !== 'status') {
       const opts = [...Object.keys(activeProviders), 'claude', 'panel', 'ping'].map((k) => `/provider ${k}`).join('、')
